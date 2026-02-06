@@ -8,7 +8,7 @@ contract ZkRevealStoreTest is Test {
     ZkRevealStore store;
 
     address seller = address(0xA11CE);
-    address buyer  = address(0xB0B);
+    address buyer = address(0xB0B);
 
     uint256 price = 0.1 ether;
     string uri = "ipfs://ciphertext.json";
@@ -181,5 +181,4 @@ contract ZkRevealStoreTest is Test {
         vm.prank(buyer);
         store.buy{value: price}(id, buyerPubKey, refundWindow);
     }
-
 }

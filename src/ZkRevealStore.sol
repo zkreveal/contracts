@@ -11,8 +11,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 contract ZkRevealStore is ReentrancyGuard {
     enum State {
         Listed,
-        Paid,       // buyer paid, waiting for seller EK
-        Revealed,   // EK posted, seller paid
+        Paid, // buyer paid, waiting for seller EK
+        Revealed, // EK posted, seller paid
         Refunded,
         Cancelled
     }
@@ -26,32 +26,23 @@ contract ZkRevealStore is ReentrancyGuard {
         uint256 priceWei;
         string ciphertextURI; // pointer to encrypted secret blob (AES-GCM)
 
-        bytes buyerPubKey;    // buyer's encryption pubkey (e.g., X25519), provided at buy()
-        uint64 deadline;      // refund deadline (unix time)
+        bytes buyerPubKey; // buyer's encryption pubkey (e.g., X25519), provided at buy()
+        uint64 deadline; // refund deadline (unix time)
         State state;
 
-        bytes ek;             // encrypted key blob (K encrypted to buyerPubKey)
+        bytes ek; // encrypted key blob (K encrypted to buyerPubKey)
     }
 
     uint256 public nextItemId = 1;
     mapping(uint256 => Item) public items;
 
-    event ItemCreated(
-        uint256 indexed itemId,
-        address indexed seller,
-        uint256 priceWei,
-        string ciphertextURI
-    );
+    event ItemCreated(uint256 indexed itemId, address indexed seller, uint256 priceWei, string ciphertextURI);
 
     event ItemCancelled(uint256 indexed itemId);
 
     /// @notice buyerPubKey is NOT emitted (privacy). We emit only a hash.
     event ItemBought(
-        uint256 indexed itemId,
-        address indexed buyer,
-        uint256 priceWei,
-        uint64 deadline,
-        bytes32 buyerPubKeyHash
+        uint256 indexed itemId, address indexed buyer, uint256 priceWei, uint64 deadline, bytes32 buyerPubKeyHash
     );
 
     event EkRevealed(uint256 indexed itemId, bytes ek);
@@ -68,8 +59,8 @@ contract ZkRevealStore is ReentrancyGuard {
     error EmptyValue();
 
     modifier itemExists(uint256 itemId) {
-    _itemExists(itemId);
-    _;
+        _itemExists(itemId);
+        _;
     }
 
     function _itemExists(uint256 itemId) internal view {
@@ -141,23 +132,12 @@ contract ZkRevealStore is ReentrancyGuard {
         it.deadline = uint64(block.timestamp) + refundWindowSeconds;
         it.state = State.Paid;
 
-        emit ItemBought(
-            itemId,
-            msg.sender,
-            it.priceWei,
-            it.deadline,
-            keccak256(abi.encodePacked(buyerPubKey))
-        );
+        emit ItemBought(itemId, msg.sender, it.priceWei, it.deadline, keccak256(abi.encodePacked(buyerPubKey)));
     }
 
     /// @notice Seller posts EK (encrypted K for buyer). Under trusted seller assumption, contract does not validate correctness.
     ///         Seller is paid immediately upon reveal.
-    function revealEk(uint256 itemId, bytes calldata ek)
-        external
-        itemExists(itemId)
-        onlySeller(itemId)
-        nonReentrant
-    {
+    function revealEk(uint256 itemId, bytes calldata ek) external itemExists(itemId) onlySeller(itemId) nonReentrant {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
         if (ek.length == 0) revert EmptyValue();
@@ -166,26 +146,21 @@ contract ZkRevealStore is ReentrancyGuard {
         it.ek = ek;
         it.state = State.Revealed;
 
-        (bool ok, ) = it.seller.call{value: it.priceWei}("");
+        (bool ok,) = it.seller.call{value: it.priceWei}("");
         require(ok, "PAY_FAIL");
 
         emit EkRevealed(itemId, ek);
     }
 
     /// @notice Buyer refunds only if seller did not reveal by deadline.
-    function refund(uint256 itemId)
-        external
-        itemExists(itemId)
-        onlyBuyer(itemId)
-        nonReentrant
-    {
+    function refund(uint256 itemId) external itemExists(itemId) onlyBuyer(itemId) nonReentrant {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
         if (block.timestamp <= it.deadline) revert DeadlineNotPassed();
 
         it.state = State.Refunded;
 
-        (bool ok, ) = it.buyer.call{value: it.priceWei}("");
+        (bool ok,) = it.buyer.call{value: it.priceWei}("");
         require(ok, "REFUND_FAIL");
 
         emit ItemRefunded(itemId, it.buyer, it.priceWei);
