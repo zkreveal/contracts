@@ -7,7 +7,13 @@ import {ZkRevealStore} from "../src/ZkRevealStore.sol";
 
 contract Deploy is Script {
     function run() external {
-        vm.startBroadcast();
+        uint256 pk = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        address deployer = vm.addr(pk);
+
+        console2.log("Deployer:", deployer);
+        console2.log("ChainId:", block.chainid);
+
+        vm.startBroadcast(pk);
         ZkRevealStore store = new ZkRevealStore();
         vm.stopBroadcast();
 
