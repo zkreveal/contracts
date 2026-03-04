@@ -36,7 +36,7 @@ contract ZkRevealStore is ReentrancyGuard {
     uint256 public nextItemId = 1;
     mapping(uint256 => Item) public items;
 
-    event ItemCreated(uint256 indexed itemId, address indexed seller, uint256 priceWei, string ciphertextURI);
+    event ItemCreated(uint256 indexed itemId, address indexed seller, uint256 priceWei, bytes32 ciphertextURIHash);
 
     event ItemCancelled(uint256 indexed itemId);
 
@@ -103,7 +103,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.state = State.Listed;
         it.deliveryHash = bytes32(0);
 
-        emit ItemCreated(itemId, msg.sender, priceWei, ciphertextURI);
+        emit ItemCreated(itemId, msg.sender, priceWei, keccak256(bytes(ciphertextURI)));
     }
 
     /// @notice Seller may cancel before purchase.
