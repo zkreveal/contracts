@@ -138,7 +138,12 @@ contract ZkRevealStore is ReentrancyGuard {
     /// @notice Seller commits a delivery hash for off-chain EK delivery.
     ///         Under trusted seller assumption, contract does not validate correctness.
     ///         Seller is paid immediately upon commit.
-    function commitDelivery(uint256 itemId, bytes32 deliveryHash) external itemExists(itemId) onlySeller(itemId) nonReentrant {
+    function commitDelivery(uint256 itemId, bytes32 deliveryHash)
+        external
+        itemExists(itemId)
+        onlySeller(itemId)
+        nonReentrant
+    {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
         if (deliveryHash == bytes32(0)) revert EmptyValue();
