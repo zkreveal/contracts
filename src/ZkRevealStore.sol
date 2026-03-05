@@ -26,9 +26,10 @@ contract ZkRevealStore is ReentrancyGuard {
         address buyer;
 
         uint256 priceWei;
-        bytes32 encUriHash; // commitment to encrypted URI bytes or encrypted URI pointer bytes
+        string encUriPointer; // pointer/CID to encrypted URI blob
+        bytes32 encUriPointerHash; // commitment to encUriPointer bytes
         bytes32 ciphertextHash; // commitment to encrypted content bytes or CID bytes
-        bytes32 kHash; // optional commitment keccak256(K || salt), can be 0x0 if unused
+        bytes32 kHash; // mandatory commitment keccak256(K || salt)
 
         bytes32 buyerPubKeyHash; // keccak256(buyerPubKey) captured at buy()
         uint64 deadline; // refund deadline (unix time)
@@ -39,13 +40,13 @@ contract ZkRevealStore is ReentrancyGuard {
     }
 
     uint256 public nextItemId = 1;
-    mapping(uint256 => Item) public items;
+    mapping(uint256 => Item) private items;
 
     event ItemCreated(
         uint256 indexed itemId,
         address indexed seller,
         uint256 priceWei,
-        bytes32 encUriHash,
+        bytes32 encUriPointerHash,
         bytes32 ciphertextHash,
         bytes32 kHash
     );
@@ -99,13 +100,19 @@ contract ZkRevealStore is ReentrancyGuard {
         if (items[itemId].buyer != msg.sender) revert NotBuyer();
     }
 
-    function createItem(uint256 priceWei, bytes32 encUriHash, bytes32 ciphertextHash, bytes32 kHash)
-        external
-        returns (uint256 itemId)
-    {
+    function createItem(
+        uint256 priceWei,
+        string calldata encUriPointer,
+        bytes32 encUriPointerHash,
+        bytes32 ciphertextHash,
+        bytes32 kHash
+    ) external returns (uint256 itemId) {
         if (priceWei == 0) revert InvalidParams();
-        if (encUriHash == bytes32(0)) revert InvalidParams();
+        if (bytes(encUriPointer).length == 0) revert InvalidParams();
+        if (encUriPointerHash == bytes32(0)) revert InvalidParams();
+        if (keccak256(bytes(encUriPointer)) != encUriPointerHash) revert InvalidParams();
         if (ciphertextHash == bytes32(0)) revert InvalidParams();
+        if (kHash == bytes32(0)) revert InvalidParams();
 
         itemId = nextItemId++;
 
@@ -115,7 +122,8 @@ contract ZkRevealStore is ReentrancyGuard {
         it.seller = msg.sender;
         it.buyer = address(0);
         it.priceWei = priceWei;
-        it.encUriHash = encUriHash;
+        it.encUriPointer = encUriPointer;
+        it.encUriPointerHash = encUriPointerHash;
         it.ciphertextHash = ciphertextHash;
         it.kHash = kHash;
         it.buyerPubKeyHash = bytes32(0);
@@ -124,7 +132,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.ekHash = bytes32(0);
         it.ekCiphertext = "";
 
-        emit ItemCreated(itemId, msg.sender, priceWei, encUriHash, ciphertextHash, kHash);
+        emit ItemCreated(itemId, msg.sender, priceWei, encUriPointerHash, ciphertextHash, kHash);
     }
 
     /// @notice Seller may cancel before purchase.
@@ -213,6 +221,34 @@ contract ZkRevealStore is ReentrancyGuard {
         return items[itemId].ekCiphertext;
     }
 
+    /// @notice Canonical receipt hash for off-chain EK delivery verification.
+    /// @dev Recommended preimage:
+    ///      keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt))
+    function hashDeliveryReceipt(
+        uint256 itemId,
+        address buyer,
+        bytes32 buyerPubKeyHash,
+        bytes calldata ekCiphertext,
+        bytes32 salt
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt));
+    }
+
+    function getEncUriPointer(uint256 itemId) external view itemExists(itemId) returns (string memory) {
+        return items[itemId].encUriPointer;
+    }
+
+    function getEncUriPointerHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].encUriPointerHash;
+    }
+
+    function getCiphertextHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].ciphertextHash;
+    }
+
+    function getKHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].kHash;
+    }
 
     function getDeadline(uint256 itemId) external view itemExists(itemId) returns (uint64) {
         return items[itemId].deadline;
@@ -223,18 +259,9 @@ contract ZkRevealStore is ReentrancyGuard {
         external
         view
         itemExists(itemId)
-        returns (
-            address seller,
-            address buyer,
-            uint256 priceWei,
-            bytes32 encUriHash,
-            bytes32 ciphertextHash,
-            bytes32 kHash,
-            uint64 deadline,
-            State state
-        )
+        returns (address seller, address buyer, uint256 priceWei, uint64 deadline, State state)
     {
         Item storage it = items[itemId];
-        return (it.seller, it.buyer, it.priceWei, it.encUriHash, it.ciphertextHash, it.kHash, it.deadline, it.state);
+        return (it.seller, it.buyer, it.priceWei, it.deadline, it.state);
     }
 }

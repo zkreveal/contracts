@@ -11,7 +11,8 @@ contract ZkRevealStoreTest is Test {
     address buyer = address(0xB0B);
 
     uint256 price = 0.1 ether;
-    bytes32 encUriHash = keccak256("enc-uri-blob");
+    string encUriPointer = "ipfs://bafybeihash/encrypted-uri.bin";
+    bytes32 encUriPointerHash = keccak256(bytes(encUriPointer));
     bytes32 ciphertextHash = keccak256("ciphertext-blob");
     bytes32 kHash = keccak256("k-hash");
     bytes buyerPubKey = hex"01020304";
@@ -26,7 +27,7 @@ contract ZkRevealStoreTest is Test {
 
     function _createItemAsSeller() internal returns (uint256 itemId) {
         vm.prank(seller);
-        itemId = store.createItem(price, encUriHash, ciphertextHash, kHash);
+        itemId = store.createItem(price, encUriPointer, encUriPointerHash, ciphertextHash, kHash);
     }
 
     function _buyAsBuyer(uint256 itemId) internal {
@@ -184,15 +185,36 @@ contract ZkRevealStoreTest is Test {
     function test_CreateItemInvalidParams_Reverts() public {
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(0, encUriHash, ciphertextHash, kHash);
+        store.createItem(0, encUriPointer, encUriPointerHash, ciphertextHash, kHash);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, bytes32(0), ciphertextHash, kHash);
+        store.createItem(price, "", encUriPointerHash, ciphertextHash, kHash);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, encUriHash, bytes32(0), kHash);
+        store.createItem(price, encUriPointer, bytes32(0), ciphertextHash, kHash);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createItem(price, encUriPointer, keccak256("wrong-pointer-hash"), ciphertextHash, kHash);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createItem(price, encUriPointer, encUriPointerHash, bytes32(0), kHash);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createItem(price, encUriPointer, encUriPointerHash, ciphertextHash, bytes32(0));
+    }
+
+    function test_CreateItem_StoresEncUriPointer() public {
+        uint256 id = _createItemAsSeller();
+
+        assertEq(store.getEncUriPointer(id), encUriPointer);
+        assertEq(store.getEncUriPointerHash(id), encUriPointerHash);
+        assertEq(store.getCiphertextHash(id), ciphertextHash);
+        assertEq(store.getKHash(id), kHash);
     }
 
     function test_ItemBought_EmitsBuyerPubKeyHash() public {
