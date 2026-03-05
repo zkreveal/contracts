@@ -35,7 +35,8 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ItemCreated_EmitsLockedFields() public {
-        vm.expectEmit(true, true, true, true);
+        // ItemCreated has 2 indexed params (itemId, seller)
+        vm.expectEmit(true, true, false, true);
         emit ZkRevealStore.ItemCreated(1, seller, price, contentCIDHash, kHash);
 
         vm.prank(seller);
@@ -264,7 +265,8 @@ contract ZkRevealStoreTest is Test {
         uint256 id = _createItemAsSeller();
         bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
 
-        vm.expectEmit(true, true, true, true);
+        // ItemBought has 2 indexed params (itemId, buyer)
+        vm.expectEmit(true, true, false, true);
         emit ZkRevealStore.ItemBought(id, buyer, price, uint64(block.timestamp) + refundWindow, buyerPubKeyHash);
 
         vm.prank(buyer);

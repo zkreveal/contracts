@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title ZkRevealStore (Privacy-Preserving Delivery Escrow)
-/// @notice Seller publishes encrypted-data commitments on-chain, buyer pays, and seller is paid
-///         only after posting actual EK ciphertext on-chain before deadline.
-/// @dev This improves trust-minimization vs hash-only delivery, while still not proving EK correctness.
+/// @title ZkRevealStore (Trusted Seller v0 - Delivery Escrow)
+/// @notice Seller lists an encrypted content CID + key commitment. Buyer pays escrow.
+///         Seller is paid only after posting EK ciphertext on-chain before deadline.
+/// @dev Seller is trusted to provide correct EK. Contract enforces escrow + deadline refund.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
@@ -36,21 +36,29 @@ contract ZkRevealStore is ReentrancyGuard {
 
         bytes32 ekHash; // keccak256(ekCiphertext)
         bytes32 deliveryReceiptHash; // keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))
-        bytes ekCiphertext; // actual encrypted K-for-buyer payload posted on-chain
+        bytes ekCiphertext; // encrypted (K||salt) for buyer
     }
 
     uint256 public nextItemId = 1;
     mapping(uint256 => Item) private items;
 
     event ItemCreated(
-        uint256 indexed itemId, address indexed seller, uint256 priceWei, bytes32 contentCIDHash, bytes32 kHash
+        uint256 indexed itemId,
+        address indexed seller,
+        uint256 priceWei,
+        bytes32 contentCIDHash,
+        bytes32 kHash
     );
 
     event ItemCancelled(uint256 indexed itemId);
 
     /// @notice Raw buyer pubkey is not emitted/stored; only hash is recorded.
     event ItemBought(
-        uint256 indexed itemId, address indexed buyer, uint256 priceWei, uint64 deadline, bytes32 buyerPubKeyHash
+        uint256 indexed itemId,
+        address indexed buyer,
+        uint256 priceWei,
+        uint64 deadline,
+        bytes32 buyerPubKeyHash
     );
 
     event ItemDelivered(uint256 indexed itemId, bytes32 ekHash, bytes32 deliveryReceiptHash);
@@ -79,21 +87,13 @@ contract ZkRevealStore is ReentrancyGuard {
     }
 
     modifier onlySeller(uint256 itemId) {
-        _onlySeller(itemId);
+        if (items[itemId].seller != msg.sender) revert NotSeller();
         _;
     }
 
     modifier onlyBuyer(uint256 itemId) {
-        _onlyBuyer(itemId);
-        _;
-    }
-
-    function _onlySeller(uint256 itemId) internal view {
-        if (items[itemId].seller != msg.sender) revert NotSeller();
-    }
-
-    function _onlyBuyer(uint256 itemId) internal view {
         if (items[itemId].buyer != msg.sender) revert NotBuyer();
+        _;
     }
 
     function createItem(uint256 priceWei, string calldata contentCID, bytes32 contentCIDHash, bytes32 kHash)
@@ -196,7 +196,7 @@ contract ZkRevealStore is ReentrancyGuard {
         emit ItemRefunded(itemId, it.buyer, it.priceWei);
     }
 
-    // Convenience getters
+    // ===== Getters (UI + off-chain verification) =====
 
     function getState(uint256 itemId) external view itemExists(itemId) returns (State) {
         return items[itemId].state;
