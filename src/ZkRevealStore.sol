@@ -36,6 +36,7 @@ contract ZkRevealStore is ReentrancyGuard {
         State state;
 
         bytes32 ekHash; // keccak256(ekCiphertext)
+        bytes32 deliveryReceiptHash; // keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))
         bytes ekCiphertext; // actual encrypted K-for-buyer payload posted on-chain
     }
 
@@ -58,7 +59,7 @@ contract ZkRevealStore is ReentrancyGuard {
         uint256 indexed itemId, address indexed buyer, uint256 priceWei, uint64 deadline, bytes32 buyerPubKeyHash
     );
 
-    event ItemDelivered(uint256 indexed itemId, bytes32 ekHash);
+    event ItemDelivered(uint256 indexed itemId, bytes32 ekHash, bytes32 deliveryReceiptHash);
     event ItemRefunded(uint256 indexed itemId, address indexed buyer, uint256 amountWei);
 
     error ItemNotFound();
@@ -130,6 +131,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.deadline = 0;
         it.state = State.Listed;
         it.ekHash = bytes32(0);
+        it.deliveryReceiptHash = bytes32(0);
         it.ekCiphertext = "";
 
         emit ItemCreated(itemId, msg.sender, priceWei, encUriPointerHash, ciphertextHash, kHash);
@@ -180,13 +182,14 @@ contract ZkRevealStore is ReentrancyGuard {
         if (block.timestamp > it.deadline) revert DeadlinePassed();
 
         it.ekHash = keccak256(ekCiphertext);
+        it.deliveryReceiptHash = keccak256(abi.encode(itemId, it.buyer, it.buyerPubKeyHash, ekCiphertext));
         it.ekCiphertext = ekCiphertext;
         it.state = State.Committed;
 
         (bool ok,) = it.seller.call{value: it.priceWei}("");
         if (!ok) revert PayFail();
 
-        emit ItemDelivered(itemId, it.ekHash);
+        emit ItemDelivered(itemId, it.ekHash, it.deliveryReceiptHash);
     }
 
     /// @notice Buyer refunds only if seller did not deliver EK ciphertext by deadline.
@@ -217,21 +220,23 @@ contract ZkRevealStore is ReentrancyGuard {
         return items[itemId].ekHash;
     }
 
+    function getDeliveryReceiptHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].deliveryReceiptHash;
+    }
+
     function getEkCiphertext(uint256 itemId) external view itemExists(itemId) returns (bytes memory) {
         return items[itemId].ekCiphertext;
     }
 
     /// @notice Canonical receipt hash for off-chain EK delivery verification.
     /// @dev Recommended preimage:
-    ///      keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt))
-    function hashDeliveryReceipt(
-        uint256 itemId,
-        address buyer,
-        bytes32 buyerPubKeyHash,
-        bytes calldata ekCiphertext,
-        bytes32 salt
-    ) external pure returns (bytes32) {
-        return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt));
+    ///      keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))
+    function hashDeliveryReceipt(uint256 itemId, address buyer, bytes32 buyerPubKeyHash, bytes calldata ekCiphertext)
+        external
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext));
     }
 
     function getEncUriPointer(uint256 itemId) external view itemExists(itemId) returns (string memory) {

@@ -233,18 +233,18 @@ contract ZkRevealStoreTest is Test {
         _buyAsBuyer(id);
 
         bytes memory ekCiphertext = hex"c001c0de";
-        bytes32 salt = keccak256("delivery-salt");
         bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
 
-        bytes32 deliveryHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext, salt));
+        bytes32 deliveryReceiptHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext));
 
-        bytes32 canonicalHash = store.hashDeliveryReceipt(id, buyer, buyerPubKeyHash, ekCiphertext, salt);
-        assertEq(canonicalHash, deliveryHash);
+        bytes32 canonicalHash = store.hashDeliveryReceipt(id, buyer, buyerPubKeyHash, ekCiphertext);
+        assertEq(canonicalHash, deliveryReceiptHash);
 
         vm.prank(seller);
         store.deliver(id, buyerPubKey, ekCiphertext);
 
         assertEq(store.getEkHash(id), keccak256(ekCiphertext));
+        assertEq(store.getDeliveryReceiptHash(id), deliveryReceiptHash);
     }
 
     function test_DeliverMismatchedBuyerPubKey_Reverts() public {
