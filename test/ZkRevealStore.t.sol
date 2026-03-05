@@ -11,8 +11,10 @@ contract ZkRevealStoreTest is Test {
     address buyer = address(0xB0B);
 
     uint256 price = 0.1 ether;
-    string uri = "ipfs://ciphertext.json";
-    bytes32 buyerPubKeyHash = keccak256("buyer-pubkey-commitment");
+    bytes32 encUriHash = keccak256("enc-uri-blob");
+    bytes32 ciphertextHash = keccak256("ciphertext-blob");
+    bytes32 kHash = keccak256("k-hash");
+    bytes buyerPubKey = hex"01020304";
     uint64 refundWindow = 1 hours;
 
     function setUp() public {
@@ -24,33 +26,34 @@ contract ZkRevealStoreTest is Test {
 
     function _createItemAsSeller() internal returns (uint256 itemId) {
         vm.prank(seller);
-        itemId = store.createItem(price, uri);
+        itemId = store.createItem(price, encUriHash, ciphertextHash, kHash);
     }
 
     function _buyAsBuyer(uint256 itemId) internal {
         vm.prank(buyer);
-        store.buy{value: price}(itemId, buyerPubKeyHash, refundWindow);
+        store.buy{value: price}(itemId, buyerPubKey, refundWindow);
     }
 
-    // 1) create → buy → reveal (seller gets paid)
-    function test_HappyPath_RevealPaysSeller() public {
+    // 1) create → buy → deliver (seller gets paid)
+    function test_HappyPath_DeliverPaysSeller() public {
         uint256 id = _createItemAsSeller();
 
         uint256 sellerBalBefore = seller.balance;
 
         _buyAsBuyer(id);
 
-        // Seller commits delivery before deadline => seller paid immediately
-        bytes32 deliveryHash = keccak256("ek-delivery-commitment");
+        // Seller delivers EK ciphertext before deadline => seller paid immediately
+        bytes memory ekCiphertext = hex"deadbeef";
 
         vm.prank(seller);
-        store.commitDelivery(id, deliveryHash);
+        store.deliver(id, buyerPubKey, ekCiphertext);
 
         assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Committed));
         assertEq(seller.balance, sellerBalBefore + price);
 
-        // delivery hash stored
-        assertEq(store.getDeliveryHash(id), deliveryHash);
+        // EK payload + hash stored
+        assertEq(store.getEkHash(id), keccak256(ekCiphertext));
+        assertEq(store.getEkCiphertext(id), ekCiphertext);
     }
 
     // 2) create → buy → refund after deadline (buyer gets paid)
@@ -83,8 +86,8 @@ contract ZkRevealStoreTest is Test {
         store.refund(id);
     }
 
-    // 4) reveal after deadline reverts
-    function test_RevealAfterDeadlineReverts() public {
+    // 4) deliver after deadline reverts
+    function test_DeliverAfterDeadlineReverts() public {
         uint256 id = _createItemAsSeller();
 
         _buyAsBuyer(id);
@@ -94,7 +97,7 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.DeadlinePassed.selector);
-        store.commitDelivery(id, keccak256("late-delivery"));
+        store.deliver(id, buyerPubKey, hex"01");
     }
 
     // 5) nonexistent item reverts (ItemNotFound)
@@ -103,15 +106,15 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.buy{value: price}(fakeId, buyerPubKeyHash, refundWindow);
+        store.buy{value: price}(fakeId, buyerPubKey, refundWindow);
     }
 
-    function test_ItemNotFound_RevertsOnReveal() public {
+    function test_ItemNotFound_RevertsOnDeliver() public {
         uint256 fakeId = 999999;
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.commitDelivery(fakeId, keccak256("missing-item"));
+        store.deliver(fakeId, buyerPubKey, hex"01");
     }
 
     function test_ItemNotFound_RevertsOnRefund() public {
@@ -149,15 +152,15 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.BadPrice.selector);
-        store.buy{value: price - 1}(id, buyerPubKeyHash, refundWindow);
+        store.buy{value: price - 1}(id, buyerPubKey, refundWindow);
     }
 
-    function test_BuyZeroPubKeyHash_Reverts() public {
+    function test_BuyEmptyPubKey_Reverts() public {
         uint256 id = _createItemAsSeller();
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, bytes32(0), refundWindow);
+        store.buy{value: price}(id, "", refundWindow);
     }
 
     function test_BuyRefundWindowTooShort_Reverts() public {
@@ -166,7 +169,7 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, buyerPubKeyHash, tooShort);
+        store.buy{value: price}(id, buyerPubKey, tooShort);
     }
 
     function test_BuyRefundWindowTooLong_Reverts() public {
@@ -175,27 +178,32 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, buyerPubKeyHash, tooLong);
+        store.buy{value: price}(id, buyerPubKey, tooLong);
     }
 
     function test_CreateItemInvalidParams_Reverts() public {
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(0, uri);
+        store.createItem(0, encUriHash, ciphertextHash, kHash);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, "");
+        store.createItem(price, bytes32(0), ciphertextHash, kHash);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createItem(price, encUriHash, bytes32(0), kHash);
     }
 
     function test_ItemBought_EmitsBuyerPubKeyHash() public {
         uint256 id = _createItemAsSeller();
+        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
 
         vm.expectEmit(true, true, true, true);
         emit ZkRevealStore.ItemBought(id, buyer, price, uint64(block.timestamp) + refundWindow, buyerPubKeyHash);
 
         vm.prank(buyer);
-        store.buy{value: price}(id, buyerPubKeyHash, refundWindow);
+        store.buy{value: price}(id, buyerPubKey, refundWindow);
     }
 
     function test_DeliveryReceiptHash_CanBeVerifiedOffChain() public {
@@ -204,6 +212,7 @@ contract ZkRevealStoreTest is Test {
 
         bytes memory ekCiphertext = hex"c001c0de";
         bytes32 salt = keccak256("delivery-salt");
+        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
 
         bytes32 deliveryHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext, salt));
 
@@ -211,8 +220,26 @@ contract ZkRevealStoreTest is Test {
         assertEq(canonicalHash, deliveryHash);
 
         vm.prank(seller);
-        store.commitDelivery(id, deliveryHash);
+        store.deliver(id, buyerPubKey, ekCiphertext);
 
-        assertEq(store.getDeliveryHash(id), deliveryHash);
+        assertEq(store.getEkHash(id), keccak256(ekCiphertext));
+    }
+
+    function test_DeliverMismatchedBuyerPubKey_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.deliver(id, hex"0badf00d", hex"beef");
+    }
+
+    function test_DeliverEmptyEkCiphertext_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.EmptyValue.selector);
+        store.deliver(id, buyerPubKey, "");
     }
 }

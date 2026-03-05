@@ -3,11 +3,10 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title ZkRevealStore (Trusted Seller v2 - Privacy Preserving)
-/// @notice Seller is trusted to deliver a valid EK to the buyer off-chain.
-///         Contract enforces: single-buyer purchase, escrow, deadline-based refund if seller never commits delivery.
-///         If seller commits delivery before deadline, seller is paid immediately.
-/// @dev Raw buyerPubKey and EK are never stored on-chain; only commitments are recorded.
+/// @title ZkRevealStore (Privacy-Preserving Delivery Escrow)
+/// @notice Seller publishes encrypted-data commitments on-chain, buyer pays, and seller is paid
+///         only after posting actual EK ciphertext on-chain before deadline.
+/// @dev This improves trust-minimization vs hash-only delivery, while still not proving EK correctness.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
@@ -15,7 +14,7 @@ contract ZkRevealStore is ReentrancyGuard {
     enum State {
         Listed,
         Paid, // buyer paid, waiting for seller EK
-        Committed, // delivery hash committed, seller paid
+        Committed, // EK ciphertext posted, seller paid
         Refunded,
         Cancelled
     }
@@ -27,28 +26,38 @@ contract ZkRevealStore is ReentrancyGuard {
         address buyer;
 
         uint256 priceWei;
-        string ciphertextURI; // pointer to encrypted secret blob (AES-GCM)
+        bytes32 encUriHash; // commitment to encrypted URI bytes or encrypted URI pointer bytes
+        bytes32 ciphertextHash; // commitment to encrypted content bytes or CID bytes
+        bytes32 kHash; // optional commitment keccak256(K || salt), can be 0x0 if unused
 
-        bytes32 buyerPubKeyHash; // hash commitment to buyer encryption pubkey (recommend salted hash)
+        bytes32 buyerPubKeyHash; // keccak256(buyerPubKey) captured at buy()
         uint64 deadline; // refund deadline (unix time)
         State state;
 
-        bytes32 deliveryHash; // hash commitment to delivered EK payload (recommend salted hash)
+        bytes32 ekHash; // keccak256(ekCiphertext)
+        bytes ekCiphertext; // actual encrypted K-for-buyer payload posted on-chain
     }
 
     uint256 public nextItemId = 1;
     mapping(uint256 => Item) public items;
 
-    event ItemCreated(uint256 indexed itemId, address indexed seller, uint256 priceWei, bytes32 ciphertextURIHash);
+    event ItemCreated(
+        uint256 indexed itemId,
+        address indexed seller,
+        uint256 priceWei,
+        bytes32 encUriHash,
+        bytes32 ciphertextHash,
+        bytes32 kHash
+    );
 
     event ItemCancelled(uint256 indexed itemId);
 
-    /// @notice buyerPubKey is NOT emitted (privacy). We emit only a hash.
+    /// @notice Raw buyer pubkey is not emitted/stored; only hash is recorded.
     event ItemBought(
         uint256 indexed itemId, address indexed buyer, uint256 priceWei, uint64 deadline, bytes32 buyerPubKeyHash
     );
 
-    event DeliveryCommitted(uint256 indexed itemId, bytes32 deliveryHash);
+    event ItemDelivered(uint256 indexed itemId, bytes32 ekHash);
     event ItemRefunded(uint256 indexed itemId, address indexed buyer, uint256 amountWei);
 
     error ItemNotFound();
@@ -90,9 +99,13 @@ contract ZkRevealStore is ReentrancyGuard {
         if (items[itemId].buyer != msg.sender) revert NotBuyer();
     }
 
-    function createItem(uint256 priceWei, string calldata ciphertextURI) external returns (uint256 itemId) {
+    function createItem(uint256 priceWei, bytes32 encUriHash, bytes32 ciphertextHash, bytes32 kHash)
+        external
+        returns (uint256 itemId)
+    {
         if (priceWei == 0) revert InvalidParams();
-        if (bytes(ciphertextURI).length == 0) revert InvalidParams();
+        if (encUriHash == bytes32(0)) revert InvalidParams();
+        if (ciphertextHash == bytes32(0)) revert InvalidParams();
 
         itemId = nextItemId++;
 
@@ -102,13 +115,16 @@ contract ZkRevealStore is ReentrancyGuard {
         it.seller = msg.sender;
         it.buyer = address(0);
         it.priceWei = priceWei;
-        it.ciphertextURI = ciphertextURI;
+        it.encUriHash = encUriHash;
+        it.ciphertextHash = ciphertextHash;
+        it.kHash = kHash;
         it.buyerPubKeyHash = bytes32(0);
         it.deadline = 0;
         it.state = State.Listed;
-        it.deliveryHash = bytes32(0);
+        it.ekHash = bytes32(0);
+        it.ekCiphertext = "";
 
-        emit ItemCreated(itemId, msg.sender, priceWei, keccak256(bytes(ciphertextURI)));
+        emit ItemCreated(itemId, msg.sender, priceWei, encUriHash, ciphertextHash, kHash);
     }
 
     /// @notice Seller may cancel before purchase.
@@ -119,9 +135,9 @@ contract ZkRevealStore is ReentrancyGuard {
         emit ItemCancelled(itemId);
     }
 
-    /// @notice Buyer purchases item and provides a pubkey commitment for private delivery.
-    /// @param refundWindowSeconds how long buyer is willing to wait for reveal before being able to refund.
-    function buy(uint256 itemId, bytes32 buyerPubKeyHash, uint64 refundWindowSeconds)
+    /// @notice Buyer purchases item and provides raw buyer pubkey (public calldata); contract stores only hash.
+    /// @param refundWindowSeconds how long buyer is willing to wait for EK delivery before being able to refund.
+    function buy(uint256 itemId, bytes calldata buyerPubKey, uint64 refundWindowSeconds)
         external
         payable
         itemExists(itemId)
@@ -129,21 +145,20 @@ contract ZkRevealStore is ReentrancyGuard {
         Item storage it = items[itemId];
         if (it.state != State.Listed) revert BadState();
         if (msg.value != it.priceWei) revert BadPrice();
-        if (buyerPubKeyHash == bytes32(0)) revert InvalidParams();
+        if (buyerPubKey.length == 0) revert InvalidParams();
         if (refundWindowSeconds < MIN_REFUND_WINDOW || refundWindowSeconds > MAX_REFUND_WINDOW) revert InvalidParams();
 
         it.buyer = msg.sender;
-        it.buyerPubKeyHash = buyerPubKeyHash;
+        it.buyerPubKeyHash = keccak256(buyerPubKey);
         it.deadline = uint64(block.timestamp) + refundWindowSeconds;
         it.state = State.Paid;
 
-        emit ItemBought(itemId, msg.sender, it.priceWei, it.deadline, buyerPubKeyHash);
+        emit ItemBought(itemId, msg.sender, it.priceWei, it.deadline, it.buyerPubKeyHash);
     }
 
-    /// @notice Seller commits a delivery hash for off-chain EK delivery.
-    ///         Under trusted seller assumption, contract does not validate correctness.
-    ///         Seller is paid immediately upon commit.
-    function commitDelivery(uint256 itemId, bytes32 deliveryHash)
+    /// @notice Seller posts actual EK ciphertext on-chain and gets paid.
+    /// @dev Requires matching buyer pubkey hash to avoid arbitrary delivery data.
+    function deliver(uint256 itemId, bytes calldata buyerPubKey, bytes calldata ekCiphertext)
         external
         itemExists(itemId)
         onlySeller(itemId)
@@ -151,19 +166,22 @@ contract ZkRevealStore is ReentrancyGuard {
     {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
-        if (deliveryHash == bytes32(0)) revert EmptyValue();
+        if (buyerPubKey.length == 0) revert InvalidParams();
+        if (keccak256(buyerPubKey) != it.buyerPubKeyHash) revert InvalidParams();
+        if (ekCiphertext.length == 0) revert EmptyValue();
         if (block.timestamp > it.deadline) revert DeadlinePassed();
 
-        it.deliveryHash = deliveryHash;
+        it.ekHash = keccak256(ekCiphertext);
+        it.ekCiphertext = ekCiphertext;
         it.state = State.Committed;
 
         (bool ok,) = it.seller.call{value: it.priceWei}("");
         if (!ok) revert PayFail();
 
-        emit DeliveryCommitted(itemId, deliveryHash);
+        emit ItemDelivered(itemId, it.ekHash);
     }
 
-    /// @notice Buyer refunds only if seller did not reveal by deadline.
+    /// @notice Buyer refunds only if seller did not deliver EK ciphertext by deadline.
     function refund(uint256 itemId) external itemExists(itemId) onlyBuyer(itemId) nonReentrant {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
@@ -187,8 +205,12 @@ contract ZkRevealStore is ReentrancyGuard {
         return items[itemId].buyerPubKeyHash;
     }
 
-    function getDeliveryHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].deliveryHash;
+    function getEkHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].ekHash;
+    }
+
+    function getEkCiphertext(uint256 itemId) external view itemExists(itemId) returns (bytes memory) {
+        return items[itemId].ekCiphertext;
     }
 
     /// @notice Canonical receipt hash for off-chain EK delivery verification.
@@ -217,12 +239,14 @@ contract ZkRevealStore is ReentrancyGuard {
             address seller,
             address buyer,
             uint256 priceWei,
-            string memory ciphertextURI,
+            bytes32 encUriHash,
+            bytes32 ciphertextHash,
+            bytes32 kHash,
             uint64 deadline,
             State state
         )
     {
         Item storage it = items[itemId];
-        return (it.seller, it.buyer, it.priceWei, it.ciphertextURI, it.deadline, it.state);
+        return (it.seller, it.buyer, it.priceWei, it.encUriHash, it.ciphertextHash, it.kHash, it.deadline, it.state);
     }
 }
