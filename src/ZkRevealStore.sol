@@ -26,9 +26,8 @@ contract ZkRevealStore is ReentrancyGuard {
         address buyer;
 
         uint256 priceWei;
-        string encUriPointer; // pointer/CID to encrypted URI blob
-        bytes32 encUriPointerHash; // commitment to encUriPointer bytes
-        bytes32 ciphertextHash; // commitment to encrypted content bytes or CID bytes
+        string contentCID; // public CID/pointer to encrypted content blob
+        bytes32 contentCIDHash; // commitment to contentCID bytes
         bytes32 kHash; // mandatory commitment keccak256(K || salt)
 
         bytes32 buyerPubKeyHash; // keccak256(buyerPubKey) captured at buy()
@@ -44,12 +43,7 @@ contract ZkRevealStore is ReentrancyGuard {
     mapping(uint256 => Item) private items;
 
     event ItemCreated(
-        uint256 indexed itemId,
-        address indexed seller,
-        uint256 priceWei,
-        bytes32 encUriPointerHash,
-        bytes32 ciphertextHash,
-        bytes32 kHash
+        uint256 indexed itemId, address indexed seller, uint256 priceWei, bytes32 contentCIDHash, bytes32 kHash
     );
 
     event ItemCancelled(uint256 indexed itemId);
@@ -102,18 +96,14 @@ contract ZkRevealStore is ReentrancyGuard {
         if (items[itemId].buyer != msg.sender) revert NotBuyer();
     }
 
-    function createItem(
-        uint256 priceWei,
-        string calldata encUriPointer,
-        bytes32 encUriPointerHash,
-        bytes32 ciphertextHash,
-        bytes32 kHash
-    ) external returns (uint256 itemId) {
+    function createItem(uint256 priceWei, string calldata contentCID, bytes32 contentCIDHash, bytes32 kHash)
+        external
+        returns (uint256 itemId)
+    {
         if (priceWei == 0) revert InvalidParams();
-        if (bytes(encUriPointer).length == 0) revert InvalidParams();
-        if (encUriPointerHash == bytes32(0)) revert InvalidParams();
-        if (keccak256(bytes(encUriPointer)) != encUriPointerHash) revert InvalidParams();
-        if (ciphertextHash == bytes32(0)) revert InvalidParams();
+        if (bytes(contentCID).length == 0) revert InvalidParams();
+        if (contentCIDHash == bytes32(0)) revert InvalidParams();
+        if (keccak256(bytes(contentCID)) != contentCIDHash) revert InvalidParams();
         if (kHash == bytes32(0)) revert InvalidParams();
 
         itemId = nextItemId++;
@@ -124,9 +114,8 @@ contract ZkRevealStore is ReentrancyGuard {
         it.seller = msg.sender;
         it.buyer = address(0);
         it.priceWei = priceWei;
-        it.encUriPointer = encUriPointer;
-        it.encUriPointerHash = encUriPointerHash;
-        it.ciphertextHash = ciphertextHash;
+        it.contentCID = contentCID;
+        it.contentCIDHash = contentCIDHash;
         it.kHash = kHash;
         it.buyerPubKeyHash = bytes32(0);
         it.deadline = 0;
@@ -135,7 +124,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.deliveryReceiptHash = bytes32(0);
         it.ekCiphertext = "";
 
-        emit ItemCreated(itemId, msg.sender, priceWei, encUriPointerHash, ciphertextHash, kHash);
+        emit ItemCreated(itemId, msg.sender, priceWei, contentCIDHash, kHash);
     }
 
     /// @notice Seller may cancel before purchase.
@@ -240,16 +229,12 @@ contract ZkRevealStore is ReentrancyGuard {
         return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext));
     }
 
-    function getEncUriPointer(uint256 itemId) external view itemExists(itemId) returns (string memory) {
-        return items[itemId].encUriPointer;
+    function getContentCID(uint256 itemId) external view itemExists(itemId) returns (string memory) {
+        return items[itemId].contentCID;
     }
 
-    function getEncUriPointerHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].encUriPointerHash;
-    }
-
-    function getCiphertextHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].ciphertextHash;
+    function getContentCIDHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
+        return items[itemId].contentCIDHash;
     }
 
     function getKHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {

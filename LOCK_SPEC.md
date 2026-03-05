@@ -49,18 +49,17 @@ No other transitions are valid. Once `Committed`, `Refunded`, or `Cancelled`, th
 
 ## Listing Commitments
 
-`createItem(priceWei, encUriPointer, encUriPointerHash, ciphertextHash, kHash)` requires:
+`createItem(priceWei, contentCID, contentCIDHash, kHash)` requires:
 
 - non-zero `priceWei`
-- non-empty `encUriPointer`
-- non-zero `encUriPointerHash`
-- `keccak256(bytes(encUriPointer)) == encUriPointerHash`
-- non-zero `ciphertextHash`
+- non-empty `contentCID`
+- non-zero `contentCIDHash`
+- `keccak256(bytes(contentCID)) == contentCIDHash`
 - non-zero `kHash`
 
 ## Locked Event Signatures
 
-- `ItemCreated(itemId, seller, priceWei, encUriPointerHash, ciphertextHash, kHash)`
+- `ItemCreated(itemId, seller, priceWei, contentCIDHash, kHash)`
 - `ItemBought(itemId, buyer, priceWei, deadline, buyerPubKeyHash)`
 - `ItemDelivered(itemId, ekHash, deliveryReceiptHash)`
 - `ItemRefunded(itemId, buyer, amountWei)`
