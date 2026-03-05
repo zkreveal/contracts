@@ -252,7 +252,7 @@ contract ZkRevealStoreTest is Test {
         _buyAsBuyer(id);
 
         vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        vm.expectRevert(ZkRevealStore.BuyerPubKeyMismatch.selector);
         store.deliver(id, hex"0badf00d", hex"beef");
     }
 

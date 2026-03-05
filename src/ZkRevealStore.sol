@@ -71,6 +71,7 @@ contract ZkRevealStore is ReentrancyGuard {
     error DeadlineNotPassed();
     error DeadlinePassed();
     error EmptyValue();
+    error BuyerPubKeyMismatch();
     error PayFail();
     error RefundFail();
 
@@ -177,7 +178,7 @@ contract ZkRevealStore is ReentrancyGuard {
         Item storage it = items[itemId];
         if (it.state != State.Paid) revert BadState();
         if (buyerPubKey.length == 0) revert InvalidParams();
-        if (keccak256(buyerPubKey) != it.buyerPubKeyHash) revert InvalidParams();
+        if (keccak256(buyerPubKey) != it.buyerPubKeyHash) revert BuyerPubKeyMismatch();
         if (ekCiphertext.length == 0) revert EmptyValue();
         if (block.timestamp > it.deadline) revert DeadlinePassed();
 
