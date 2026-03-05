@@ -46,7 +46,7 @@ contract ZkRevealStoreTest is Test {
         vm.prank(seller);
         store.commitDelivery(id, deliveryHash);
 
-        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Revealed));
+        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Committed));
         assertEq(seller.balance, sellerBalBefore + price);
 
         // delivery hash stored

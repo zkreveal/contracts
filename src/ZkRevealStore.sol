@@ -12,7 +12,7 @@ contract ZkRevealStore is ReentrancyGuard {
     enum State {
         Listed,
         Paid, // buyer paid, waiting for seller EK
-        Revealed, // EK posted, seller paid
+        Committed, // delivery hash committed, seller paid
         Refunded,
         Cancelled
     }
@@ -150,7 +150,7 @@ contract ZkRevealStore is ReentrancyGuard {
         if (block.timestamp > it.deadline) revert DeadlinePassed();
 
         it.deliveryHash = deliveryHash;
-        it.state = State.Revealed;
+        it.state = State.Committed;
 
         (bool ok,) = it.seller.call{value: it.priceWei}("");
         require(ok, "PAY_FAIL");
