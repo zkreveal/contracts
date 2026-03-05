@@ -191,6 +191,19 @@ contract ZkRevealStore is ReentrancyGuard {
         return items[itemId].deliveryHash;
     }
 
+    /// @notice Canonical receipt hash for off-chain EK delivery verification.
+    /// @dev Recommended preimage:
+    ///      keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt))
+    function hashDeliveryReceipt(
+        uint256 itemId,
+        address buyer,
+        bytes32 buyerPubKeyHash,
+        bytes calldata ekCiphertext,
+        bytes32 salt
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext, salt));
+    }
+
     function getDeadline(uint256 itemId) external view itemExists(itemId) returns (uint64) {
         return items[itemId].deadline;
     }

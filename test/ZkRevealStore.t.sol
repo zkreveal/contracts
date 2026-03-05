@@ -197,4 +197,22 @@ contract ZkRevealStoreTest is Test {
         vm.prank(buyer);
         store.buy{value: price}(id, buyerPubKeyHash, refundWindow);
     }
+
+    function test_DeliveryReceiptHash_CanBeVerifiedOffChain() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        bytes memory ekCiphertext = hex"c001c0de";
+        bytes32 salt = keccak256("delivery-salt");
+
+        bytes32 deliveryHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext, salt));
+
+        bytes32 canonicalHash = store.hashDeliveryReceipt(id, buyer, buyerPubKeyHash, ekCiphertext, salt);
+        assertEq(canonicalHash, deliveryHash);
+
+        vm.prank(seller);
+        store.commitDelivery(id, deliveryHash);
+
+        assertEq(store.getDeliveryHash(id), deliveryHash);
+    }
 }
