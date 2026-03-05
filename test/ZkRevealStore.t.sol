@@ -160,6 +160,24 @@ contract ZkRevealStoreTest is Test {
         store.buy{value: price}(id, bytes32(0), refundWindow);
     }
 
+    function test_BuyRefundWindowTooShort_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        uint64 tooShort = store.MIN_REFUND_WINDOW() - 1;
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.buy{value: price}(id, buyerPubKeyHash, tooShort);
+    }
+
+    function test_BuyRefundWindowTooLong_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.buy{value: price}(id, buyerPubKeyHash, tooLong);
+    }
+
     function test_CreateItemInvalidParams_Reverts() public {
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);

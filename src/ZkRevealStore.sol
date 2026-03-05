@@ -9,6 +9,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///         If seller commits delivery before deadline, seller is paid immediately.
 /// @dev Raw buyerPubKey and EK are never stored on-chain; only commitments are recorded.
 contract ZkRevealStore is ReentrancyGuard {
+    uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
+    uint64 public constant MAX_REFUND_WINDOW = 30 days;
+
     enum State {
         Listed,
         Paid, // buyer paid, waiting for seller EK
@@ -125,7 +128,7 @@ contract ZkRevealStore is ReentrancyGuard {
         if (it.state != State.Listed) revert BadState();
         if (msg.value != it.priceWei) revert BadPrice();
         if (buyerPubKeyHash == bytes32(0)) revert InvalidParams();
-        if (refundWindowSeconds == 0) revert InvalidParams();
+        if (refundWindowSeconds < MIN_REFUND_WINDOW || refundWindowSeconds > MAX_REFUND_WINDOW) revert InvalidParams();
 
         it.buyer = msg.sender;
         it.buyerPubKeyHash = buyerPubKeyHash;
