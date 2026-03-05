@@ -35,6 +35,14 @@ contract ZkRevealStoreTest is Test {
         store.buy{value: price}(itemId, buyerPubKey, refundWindow);
     }
 
+    function test_ItemCreated_EmitsLockedFields() public {
+        vm.expectEmit(true, true, true, true);
+        emit ZkRevealStore.ItemCreated(1, seller, price, encUriPointerHash, ciphertextHash, kHash);
+
+        vm.prank(seller);
+        store.createItem(price, encUriPointer, encUriPointerHash, ciphertextHash, kHash);
+    }
+
     // 1) create → buy → deliver (seller gets paid)
     function test_HappyPath_DeliverPaysSeller() public {
         uint256 id = _createItemAsSeller();
@@ -55,6 +63,22 @@ contract ZkRevealStoreTest is Test {
         // EK payload + hash stored
         assertEq(store.getEkHash(id), keccak256(ekCiphertext));
         assertEq(store.getEkCiphertext(id), ekCiphertext);
+    }
+
+    function test_ItemDelivered_EmitsLockedFields() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        bytes memory ekCiphertext = hex"deadbeef";
+        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
+        bytes32 ekHash = keccak256(ekCiphertext);
+        bytes32 deliveryReceiptHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext));
+
+        vm.expectEmit(true, false, false, true);
+        emit ZkRevealStore.ItemDelivered(id, ekHash, deliveryReceiptHash);
+
+        vm.prank(seller);
+        store.deliver(id, buyerPubKey, ekCiphertext);
     }
 
     // 2) create → buy → refund after deadline (buyer gets paid)
@@ -124,6 +148,31 @@ contract ZkRevealStoreTest is Test {
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
         store.refund(fakeId);
+    }
+
+    function test_CancelListed_SetsCancelledAndLocksItem() public {
+        uint256 id = _createItemAsSeller();
+
+        vm.prank(seller);
+        store.cancelItem(id);
+        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Cancelled));
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.buy{value: price}(id, buyerPubKey, refundWindow);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.deliver(id, buyerPubKey, hex"01");
+    }
+
+    function test_CancelAfterBuy_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.cancelItem(id);
     }
 
     // Extra (recommended): onlySeller / onlyBuyer guards
@@ -245,6 +294,30 @@ contract ZkRevealStoreTest is Test {
 
         assertEq(store.getEkHash(id), keccak256(ekCiphertext));
         assertEq(store.getDeliveryReceiptHash(id), deliveryReceiptHash);
+    }
+
+    function test_DeliverTwice_RevertsSecondTime() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        vm.prank(seller);
+        store.deliver(id, buyerPubKey, hex"01");
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.deliver(id, buyerPubKey, hex"02");
+    }
+
+    function test_RefundAfterDeliver_Reverts() public {
+        uint256 id = _createItemAsSeller();
+        _buyAsBuyer(id);
+
+        vm.prank(seller);
+        store.deliver(id, buyerPubKey, hex"01");
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.refund(id);
     }
 
     function test_DeliverMismatchedBuyerPubKey_Reverts() public {
