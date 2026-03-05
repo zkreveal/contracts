@@ -60,6 +60,8 @@ contract ZkRevealStore is ReentrancyGuard {
     error DeadlineNotPassed();
     error DeadlinePassed();
     error EmptyValue();
+    error PayFail();
+    error RefundFail();
 
     modifier itemExists(uint256 itemId) {
         _itemExists(itemId);
@@ -156,7 +158,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.state = State.Committed;
 
         (bool ok,) = it.seller.call{value: it.priceWei}("");
-        require(ok, "PAY_FAIL");
+        if (!ok) revert PayFail();
 
         emit DeliveryCommitted(itemId, deliveryHash);
     }
@@ -170,7 +172,7 @@ contract ZkRevealStore is ReentrancyGuard {
         it.state = State.Refunded;
 
         (bool ok,) = it.buyer.call{value: it.priceWei}("");
-        require(ok, "REFUND_FAIL");
+        if (!ok) revert RefundFail();
 
         emit ItemRefunded(itemId, it.buyer, it.priceWei);
     }
