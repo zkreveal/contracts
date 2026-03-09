@@ -1,66 +1,88 @@
-# ZkRevealStore v0 Lock Spec (Trusted Seller Gateway)
+# ZkReveal v1 Lock Spec (Inventory Model)
 
-This file locks the expected v0 behavior for escrow, delivery, refund, and events.
+This file locks the inventory-based design:
 
-## Lifecycle
+- Seller address is business identity
+- Product is a reusable listing with per-item price
+- ProductItem is one inventory unit under product
+- Escrow is one purchase lifecycle bound to one allocated item
 
-Allowed transitions only:
+## Core Architecture
 
-- `Listed -> Paid -> Committed`
-- `Listed -> Cancelled`
-- `Paid -> Refunded`
+- `products[productId]`
+- `productItems[itemId]`
+- `escrows[escrowId]`
+- `productsBySeller[seller]`
+- `productItemIds[productId]`
 
-No other transitions are valid. Once `Committed`, `Refunded`, or `Cancelled`, the item is terminal.
+## Product Rules
 
-## Access Control
+`createProduct(title, unitPrice, refundWindow)` requires:
 
-- `cancelItem` is seller-only.
-- `deliver` is seller-only.
-- `refund` is buyer-only.
-- No admin override exists.
+- non-empty `title`
+- `unitPrice > 0`
+- `refundWindow` within `[MIN_REFUND_WINDOW, MAX_REFUND_WINDOW]`
 
-## Payment Rules
+Product semantics:
 
-- `buy` requires `msg.value == priceWei`.
-- Funds stay escrowed until one of:
-  - seller `deliver` before deadline -> seller paid
-  - buyer `refund` after deadline -> buyer paid
-- State changes occur before external value transfers.
-- `deliver` and `refund` are `nonReentrant`.
+- `unitPrice` is per-item price
+- `active` controls purchasability
+- `nextItemIndex` drives sequential allocation
+- `totalItems` = items ever added
+- `soldItems` = items ever allocated/consumed
 
-## Refund Window Bounds
+## ProductItem Rules
 
-- `MIN_REFUND_WINDOW` and `MAX_REFUND_WINDOW` are enforced in `buy`.
+`addItemsToProduct(productId, contentCIDs[])`:
 
-## Delivery Semantics
+- seller-only
+- append-only
+- each CID must be non-empty
+- each added item has `consumed = false`
 
-- `deliver` requires:
-  - `state == Paid`
-  - before deadline
-  - `keccak256(buyerPubKey) == buyerPubKeyHash`
-  - non-empty `ekCiphertext`
-- `deliver` stores:
-  - `ekCiphertext`
-  - `ekHash = keccak256(ekCiphertext)`
-  - `deliveryReceiptHash = keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))`
-- On success:
-  - `state = Committed`
-  - seller is paid immediately
+Allocation via `_allocateNextProductItem(productId)`:
 
-## Listing Commitments
+- sequential only
+- marks selected item `consumed = true`
+- increments `nextItemIndex` and `soldItems`
+- no recycling
 
-`createItem(priceWei, contentCID, contentCIDHash, kHash)` requires:
+## Purchase / Escrow Rules
 
-- non-zero `priceWei`
-- non-empty `contentCID`
-- non-zero `contentCIDHash`
-- `keccak256(bytes(contentCID)) == contentCIDHash`
-- non-zero `kHash`
+`createEscrow(productId, buyerPubKey)`:
 
-## Locked Event Signatures
+- buyer buys product (not item)
+- exact payment `msg.value == unitPrice`
+- product must be active and not sold out
+- buyer pubkey must be non-empty
+- contract allocates item internally
+- escrow stores exact `productId` and `itemId`
+- escrow starts in `Pending`
 
-- `ItemCreated(itemId, seller, priceWei, contentCIDHash, kHash)`
-- `ItemBought(itemId, buyer, priceWei, deadline, buyerPubKeyHash)`
-- `ItemDelivered(itemId, ekHash, deliveryReceiptHash)`
-- `ItemRefunded(itemId, buyer, amountWei)`
-- `ItemCancelled(itemId)`
+`deliverEscrow(escrowId, encryptedKey)`:
+
+- escrow seller only
+- only `Pending`
+- before deadline
+- non-empty payload
+- sets `encryptedKey`
+- state -> `Delivered`
+- pays seller
+
+`reclaimEscrow(escrowId)`:
+
+- escrow buyer only
+- only `Pending`
+- after deadline
+- state -> `Reclaimed`
+- refunds buyer
+- consumed item remains consumed
+
+## Locked Events
+
+- `ProductCreated(productId, seller, title, unitPrice, refundWindow)`
+- `ProductItemsAdded(productId, count)`
+- `ProductStatusChanged(productId, active)`
+- `EscrowCreated(escrowId, productId, itemId, seller, buyer, amount)`
+- `EscrowDelivered(escrowId)`
+- `EscrowReclaimed(escrowId)`

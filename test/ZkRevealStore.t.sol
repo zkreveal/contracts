@@ -9,328 +9,476 @@ contract ZkRevealStoreTest is Test {
 
     address seller = address(0xA11CE);
     address buyer = address(0xB0B);
+    address buyer2 = address(0xCAFE);
+    address attacker = address(0xD00D);
 
-    uint256 price = 0.1 ether;
-    string contentCID = "ipfs://bafybeihash/encrypted-content.bin";
-    bytes32 contentCIDHash = keccak256(bytes(contentCID));
-    bytes32 kHash = keccak256("k-hash");
-    bytes buyerPubKey = hex"01020304";
+    string title = "Pro Dataset";
+    uint256 unitPrice = 0.1 ether;
     uint64 refundWindow = 1 hours;
+    bytes buyerPubKey = hex"01020304";
+    bytes buyer2PubKey = hex"05060708";
 
     function setUp() public {
         store = new ZkRevealStore();
-
         vm.deal(seller, 10 ether);
         vm.deal(buyer, 10 ether);
+        vm.deal(buyer2, 10 ether);
+        vm.deal(attacker, 10 ether);
     }
 
-    function _createItemAsSeller() internal returns (uint256 itemId) {
+    function _createProductAsSeller() internal returns (uint256 productId) {
         vm.prank(seller);
-        itemId = store.createItem(price, contentCID, contentCIDHash, kHash);
+        productId = store.createProduct(title, unitPrice, refundWindow);
     }
 
-    function _buyAsBuyer(uint256 itemId) internal {
-        vm.prank(buyer);
-        store.buy{value: price}(itemId, buyerPubKey, refundWindow);
+    function _addItemsAsSeller(uint256 productId, string[] memory cids) internal {
+        vm.prank(seller);
+        store.addItemsToProduct(productId, cids);
     }
 
-    function test_ItemCreated_EmitsLockedFields() public {
-        // ItemCreated has 2 indexed params (itemId, seller)
-        vm.expectEmit(true, true, false, true);
-        emit ZkRevealStore.ItemCreated(1, seller, price, contentCIDHash, kHash);
+    function _buyAs(uint256 productId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
+        vm.prank(who);
+        escrowId = store.createEscrow{value: unitPrice}(productId, pubKey);
+    }
+
+    function _assertInventory(
+        uint256 productId,
+        uint256 expectedTotal,
+        uint256 expectedSold,
+        uint256 expectedRemaining,
+        bool expectedSoldOut
+    ) internal view {
+        (uint256 totalItems, uint256 soldItems, uint256 remainingItems, bool soldOut) =
+            store.getProductInventorySummary(productId);
+        assertEq(totalItems, expectedTotal);
+        assertEq(soldItems, expectedSold);
+        assertEq(remainingItems, expectedRemaining);
+        assertEq(soldOut, expectedSoldOut);
+    }
+
+    function test_ProductCreated_Emits() public {
+        vm.expectEmit(true, true, true, true);
+        emit ZkRevealStore.ProductCreated(1, seller, title, unitPrice, refundWindow);
 
         vm.prank(seller);
-        store.createItem(price, contentCID, contentCIDHash, kHash);
+        store.createProduct(title, unitPrice, refundWindow);
     }
 
-    // 1) create → buy → deliver (seller gets paid)
-    function test_HappyPath_DeliverPaysSeller() public {
-        uint256 id = _createItemAsSeller();
+    function test_CreateProduct_SetsFields() public {
+        uint256 productId = _createProductAsSeller();
 
-        uint256 sellerBalBefore = seller.balance;
+        ZkRevealStore.Product memory p = store.getProduct(productId);
+        assertEq(p.seller, seller);
+        assertEq(p.title, title);
+        assertEq(p.unitPrice, unitPrice);
+        assertEq(p.refundWindow, refundWindow);
+        assertEq(p.active, true);
+        assertEq(p.nextItemIndex, 0);
+        assertEq(p.totalItems, 0);
+        assertEq(p.soldItems, 0);
 
-        _buyAsBuyer(id);
+        uint256[] memory ids = store.getProductsBySeller(seller);
+        assertEq(ids.length, 1);
+        assertEq(ids[0], productId);
+    }
 
-        // Seller delivers EK ciphertext before deadline => seller paid immediately
-        bytes memory ekCiphertext = hex"deadbeef";
+    function test_CreateProductInvalidParams_Reverts() public {
+        uint64 tooShort = store.MIN_REFUND_WINDOW() - 1;
+        uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
 
         vm.prank(seller);
-        store.deliver(id, buyerPubKey, ekCiphertext);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createProduct("", unitPrice, refundWindow);
 
-        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Committed));
-        assertEq(seller.balance, sellerBalBefore + price);
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createProduct(title, 0, refundWindow);
 
-        // EK payload + hash stored
-        assertEq(store.getEkHash(id), keccak256(ekCiphertext));
-        assertEq(store.getEkCiphertext(id), ekCiphertext);
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createProduct(title, unitPrice, tooShort);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createProduct(title, unitPrice, tooLong);
     }
 
-    function test_ItemDelivered_EmitsLockedFields() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
+    function test_AddItems_AppendsInventory() public {
+        uint256 productId = _createProductAsSeller();
 
-        bytes memory ekCiphertext = hex"deadbeef";
-        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
-        bytes32 ekHash = keccak256(ekCiphertext);
-        bytes32 deliveryReceiptHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext));
+        string[] memory cids = new string[](3);
+        cids[0] = "ipfs://cid-1";
+        cids[1] = "ipfs://cid-2";
+        cids[2] = "ipfs://cid-3";
 
         vm.expectEmit(true, false, false, true);
-        emit ZkRevealStore.ItemDelivered(id, ekHash, deliveryReceiptHash);
+        emit ZkRevealStore.ProductItemsAdded(productId, 3);
 
-        vm.prank(seller);
-        store.deliver(id, buyerPubKey, ekCiphertext);
+        _addItemsAsSeller(productId, cids);
+
+        uint256[] memory itemIds = store.getProductItemIds(productId);
+        assertEq(itemIds.length, 3);
+
+        ZkRevealStore.Product memory p = store.getProduct(productId);
+        assertEq(p.totalItems, 3);
+        assertEq(p.soldItems, 0);
+
+        ZkRevealStore.ProductItem memory i0 = store.getProductItem(itemIds[0]);
+        ZkRevealStore.ProductItem memory i1 = store.getProductItem(itemIds[1]);
+        ZkRevealStore.ProductItem memory i2 = store.getProductItem(itemIds[2]);
+
+        assertEq(i0.productId, productId);
+        assertEq(i0.contentCID, "ipfs://cid-1");
+        assertEq(i0.consumed, false);
+
+        assertEq(i1.productId, productId);
+        assertEq(i1.contentCID, "ipfs://cid-2");
+        assertEq(i1.consumed, false);
+
+        assertEq(i2.productId, productId);
+        assertEq(i2.contentCID, "ipfs://cid-3");
+        assertEq(i2.consumed, false);
     }
 
-    // 2) create → buy → refund after deadline (buyer gets paid)
-    function test_RefundAfterDeadlinePaysBuyer() public {
-        uint256 id = _createItemAsSeller();
+    function test_AddItems_InvalidCidReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](2);
+        cids[0] = "ipfs://cid-1";
+        cids[1] = "";
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.addItemsToProduct(productId, cids);
+    }
+
+    function test_Permissions_NonSellerCannotAddItems() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+
+        vm.prank(attacker);
+        vm.expectRevert(ZkRevealStore.NotProductSeller.selector);
+        store.addItemsToProduct(productId, cids);
+    }
+
+    function test_SetProductActive_TogglesAndBlocksBuy() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        vm.expectEmit(true, false, false, true);
+        emit ZkRevealStore.ProductStatusChanged(productId, false);
+
+        vm.prank(seller);
+        store.setProductActive(productId, false);
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.ProductInactive.selector);
+        store.createEscrow{value: unitPrice}(productId, buyerPubKey);
+
+        vm.prank(seller);
+        store.setProductActive(productId, true);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+        assertEq(escrowId, 1);
+    }
+
+    function test_Permissions_NonSellerCannotToggleProductStatus() public {
+        uint256 productId = _createProductAsSeller();
+
+        vm.prank(attacker);
+        vm.expectRevert(ZkRevealStore.NotProductSeller.selector);
+        store.setProductActive(productId, false);
+    }
+
+    function test_BuyProduct_AllocatesAndCreatesOrder() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](2);
+        cids[0] = "ipfs://cid-1";
+        cids[1] = "ipfs://cid-2";
+        _addItemsAsSeller(productId, cids);
 
         uint256 buyerBalBefore = buyer.balance;
 
-        _buyAsBuyer(id);
+        vm.expectEmit(true, true, true, true);
+        emit ZkRevealStore.EscrowCreated(1, productId, 1, seller, buyer, unitPrice);
 
-        // Move time forward past deadline
-        uint64 deadline = store.getDeadline(id);
-        vm.warp(uint256(deadline) + 1);
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+        assertEq(escrowId, 1);
 
-        vm.prank(buyer);
-        store.refund(id);
+        ZkRevealStore.Escrow memory o = store.getEscrow(escrowId);
+        assertEq(o.productId, productId);
+        assertEq(o.itemId, 1);
+        assertEq(o.seller, seller);
+        assertEq(o.buyer, buyer);
+        assertEq(o.amount, unitPrice);
+        assertEq(o.buyerPubKey, buyerPubKey);
+        assertEq(uint8(o.status), uint8(ZkRevealStore.EscrowStatus.Pending));
+        assertEq(o.deadline, o.createdAt + refundWindow);
 
-        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Refunded));
-        assertEq(buyer.balance, buyerBalBefore); // buyer paid then refunded back
+        ZkRevealStore.ProductItem memory i = store.getProductItem(1);
+        assertEq(i.consumed, true);
+
+        assertEq(buyer.balance, buyerBalBefore - unitPrice);
+        assertEq(address(store).balance, unitPrice);
+
+        ZkRevealStore.Product memory p = store.getProduct(productId);
+        assertEq(p.soldItems, 1);
+        assertEq(p.nextItemIndex, 1);
+        assertEq(store.getProductRemainingItems(productId), 1);
     }
 
-    // 3) refund before deadline reverts
-    function test_RefundBeforeDeadlineReverts() public {
-        uint256 id = _createItemAsSeller();
+    function test_BuyProduct_SequentialAllocation() public {
+        uint256 productId = _createProductAsSeller();
 
-        _buyAsBuyer(id);
+        string[] memory cids = new string[](3);
+        cids[0] = "ipfs://cid-1";
+        cids[1] = "ipfs://cid-2";
+        cids[2] = "ipfs://cid-3";
+        _addItemsAsSeller(productId, cids);
 
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.DeadlineNotPassed.selector);
-        store.refund(id);
+        uint256 order1 = _buyAs(productId, buyer, buyerPubKey);
+        uint256 order2 = _buyAs(productId, buyer2, buyer2PubKey);
+
+        assertEq(store.getEscrow(order1).itemId, 1);
+        assertEq(store.getEscrow(order2).itemId, 2);
+
+        ZkRevealStore.Product memory p = store.getProduct(productId);
+        assertEq(p.soldItems, 2);
+        assertEq(p.nextItemIndex, 2);
+        assertEq(store.getProductRemainingItems(productId), 1);
     }
 
-    // 4) deliver after deadline reverts
-    function test_DeliverAfterDeadlineReverts() public {
-        uint256 id = _createItemAsSeller();
+    function test_BuyProduct_SoldOutReverts() public {
+        uint256 productId = _createProductAsSeller();
 
-        _buyAsBuyer(id);
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
 
-        uint64 deadline = store.getDeadline(id);
+        _buyAs(productId, buyer, buyerPubKey);
+
+        vm.prank(buyer2);
+        vm.expectRevert(ZkRevealStore.SoldOut.selector);
+        store.createEscrow{value: unitPrice}(productId, buyer2PubKey);
+    }
+
+    function test_BuyProduct_BadPriceReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.BadPrice.selector);
+        store.createEscrow{value: unitPrice - 1}(productId, buyerPubKey);
+    }
+
+    function test_BuyProduct_EmptyPubKeyReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createEscrow{value: unitPrice}(productId, "");
+    }
+
+    function test_Permissions_NonSellerCannotSubmitEncryptedKey() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+
+        vm.prank(attacker);
+        vm.expectRevert(ZkRevealStore.NotEscrowSeller.selector);
+        store.deliverEscrow(escrowId, hex"aa");
+    }
+
+    function test_SubmitEncryptedKey_HappyPathPaysSeller() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+        uint256 sellerBalBefore = seller.balance;
+
+        vm.expectEmit(true, false, false, true);
+        emit ZkRevealStore.EscrowDelivered(escrowId);
+
+        vm.prank(seller);
+        store.deliverEscrow(escrowId, hex"deadbeef");
+
+        ZkRevealStore.Escrow memory o = store.getEscrow(escrowId);
+        assertEq(uint8(o.status), uint8(ZkRevealStore.EscrowStatus.Delivered));
+        assertEq(o.encryptedKey, hex"deadbeef");
+
+        assertEq(seller.balance, sellerBalBefore + unitPrice);
+        assertEq(address(store).balance, 0);
+    }
+
+    function test_SubmitEncryptedKey_CannotSubmitTwice() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+
+        vm.prank(seller);
+        store.deliverEscrow(escrowId, hex"aa");
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.deliverEscrow(escrowId, hex"bb");
+    }
+
+    function test_SubmitEncryptedKey_AfterDeadlineReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+
+        uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.DeadlinePassed.selector);
-        store.deliver(id, buyerPubKey, hex"01");
+        store.deliverEscrow(escrowId, hex"aa");
     }
 
-    // 5) nonexistent item reverts (ItemNotFound)
-    function test_ItemNotFound_RevertsOnBuy() public {
-        uint256 fakeId = 999999;
+    function test_Permissions_NonBuyerCannotReclaim() public {
+        uint256 productId = _createProductAsSeller();
 
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.buy{value: price}(fakeId, buyerPubKey, refundWindow);
-    }
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
 
-    function test_ItemNotFound_RevertsOnDeliver() public {
-        uint256 fakeId = 999999;
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.deliver(fakeId, buyerPubKey, hex"01");
-    }
-
-    function test_ItemNotFound_RevertsOnRefund() public {
-        uint256 fakeId = 999999;
-
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.refund(fakeId);
-    }
-
-    function test_CancelListed_SetsCancelledAndLocksItem() public {
-        uint256 id = _createItemAsSeller();
-
-        vm.prank(seller);
-        store.cancelItem(id);
-        assertEq(uint8(store.getState(id)), uint8(ZkRevealStore.State.Cancelled));
-
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.buy{value: price}(id, buyerPubKey, refundWindow);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.deliver(id, buyerPubKey, hex"01");
-    }
-
-    function test_CancelAfterBuy_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.cancelItem(id);
-    }
-
-    // Extra (recommended): onlySeller / onlyBuyer guards
-    function test_OnlySeller_CannotCancelIfNotSeller() public {
-        uint256 id = _createItemAsSeller();
-
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.NotSeller.selector);
-        store.cancelItem(id);
-    }
-
-    function test_OnlyBuyer_CannotRefundIfNotBuyer() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
-
-        uint64 deadline = store.getDeadline(id);
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+        uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.NotBuyer.selector);
-        store.refund(id);
+        vm.prank(attacker);
+        vm.expectRevert(ZkRevealStore.NotEscrowBuyer.selector);
+        store.reclaimEscrow(escrowId);
     }
 
-    // Extra (recommended): bad price / invalid params
-    function test_BuyBadPrice_Reverts() public {
-        uint256 id = _createItemAsSeller();
+    function test_ReclaimExpired_AfterDeadlineRefundsBuyer() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 buyerBalBefore = buyer.balance;
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+
+        uint64 deadline = store.getEscrow(escrowId).deadline;
+        vm.warp(uint256(deadline) + 1);
+
+        vm.expectEmit(true, false, false, true);
+        emit ZkRevealStore.EscrowReclaimed(escrowId);
 
         vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.BadPrice.selector);
-        store.buy{value: price - 1}(id, buyerPubKey, refundWindow);
+        store.reclaimEscrow(escrowId);
+
+        ZkRevealStore.Escrow memory o = store.getEscrow(escrowId);
+        assertEq(uint8(o.status), uint8(ZkRevealStore.EscrowStatus.Reclaimed));
+        assertEq(buyer.balance, buyerBalBefore);
+
+        // Consumed inventory stays consumed (no recycle)
+        ZkRevealStore.ProductItem memory i = store.getProductItem(o.itemId);
+        assertEq(i.consumed, true);
+        assertEq(store.getProductRemainingItems(productId), 0);
     }
 
-    function test_BuyEmptyPubKey_Reverts() public {
-        uint256 id = _createItemAsSeller();
+    function test_ReclaimExpired_BeforeDeadlineReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
 
         vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, "", refundWindow);
+        vm.expectRevert(ZkRevealStore.DeadlineNotPassed.selector);
+        store.reclaimEscrow(escrowId);
     }
 
-    function test_BuyRefundWindowTooShort_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        uint64 tooShort = store.MIN_REFUND_WINDOW() - 1;
+    function test_ReclaimExpired_CannotReclaimTwice() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
+
+        uint64 deadline = store.getEscrow(escrowId).deadline;
+        vm.warp(uint256(deadline) + 1);
 
         vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, buyerPubKey, tooShort);
-    }
-
-    function test_BuyRefundWindowTooLong_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
-
-        vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.buy{value: price}(id, buyerPubKey, tooLong);
-    }
-
-    function test_CreateItemInvalidParams_Reverts() public {
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(0, contentCID, contentCIDHash, kHash);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, "", contentCIDHash, kHash);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, contentCID, bytes32(0), kHash);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, contentCID, keccak256("wrong-cid-hash"), kHash);
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createItem(price, contentCID, contentCIDHash, bytes32(0));
-    }
-
-    function test_CreateItem_StoresContentCID() public {
-        uint256 id = _createItemAsSeller();
-
-        assertEq(store.getContentCID(id), contentCID);
-        assertEq(store.getContentCIDHash(id), contentCIDHash);
-        assertEq(store.getKHash(id), kHash);
-    }
-
-    function test_ItemBought_EmitsBuyerPubKeyHash() public {
-        uint256 id = _createItemAsSeller();
-        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
-
-        // ItemBought has 2 indexed params (itemId, buyer)
-        vm.expectEmit(true, true, false, true);
-        emit ZkRevealStore.ItemBought(id, buyer, price, uint64(block.timestamp) + refundWindow, buyerPubKeyHash);
-
-        vm.prank(buyer);
-        store.buy{value: price}(id, buyerPubKey, refundWindow);
-    }
-
-    function test_DeliveryReceiptHash_CanBeVerifiedOffChain() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
-
-        bytes memory ekCiphertext = hex"c001c0de";
-        bytes32 buyerPubKeyHash = keccak256(buyerPubKey);
-
-        bytes32 deliveryReceiptHash = keccak256(abi.encode(id, buyer, buyerPubKeyHash, ekCiphertext));
-
-        bytes32 canonicalHash = store.hashDeliveryReceipt(id, buyer, buyerPubKeyHash, ekCiphertext);
-        assertEq(canonicalHash, deliveryReceiptHash);
-
-        vm.prank(seller);
-        store.deliver(id, buyerPubKey, ekCiphertext);
-
-        assertEq(store.getEkHash(id), keccak256(ekCiphertext));
-        assertEq(store.getDeliveryReceiptHash(id), deliveryReceiptHash);
-    }
-
-    function test_DeliverTwice_RevertsSecondTime() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
-
-        vm.prank(seller);
-        store.deliver(id, buyerPubKey, hex"01");
-
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.deliver(id, buyerPubKey, hex"02");
-    }
-
-    function test_RefundAfterDeliver_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
-
-        vm.prank(seller);
-        store.deliver(id, buyerPubKey, hex"01");
+        store.reclaimEscrow(escrowId);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.refund(id);
+        store.reclaimEscrow(escrowId);
     }
 
-    function test_DeliverMismatchedBuyerPubKey_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
+    function test_ReclaimAfterDeliveryReverts() public {
+        uint256 productId = _createProductAsSeller();
+
+        string[] memory cids = new string[](1);
+        cids[0] = "ipfs://cid-1";
+        _addItemsAsSeller(productId, cids);
+
+        uint256 escrowId = _buyAs(productId, buyer, buyerPubKey);
 
         vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.BuyerPubKeyMismatch.selector);
-        store.deliver(id, hex"0badf00d", hex"beef");
+        store.deliverEscrow(escrowId, hex"aa");
+
+        vm.warp(uint256(store.getEscrow(escrowId).deadline) + 1);
+
+        vm.prank(buyer);
+        vm.expectRevert(ZkRevealStore.BadState.selector);
+        store.reclaimEscrow(escrowId);
     }
 
-    function test_DeliverEmptyEkCiphertext_Reverts() public {
-        uint256 id = _createItemAsSeller();
-        _buyAsBuyer(id);
+    function test_ViewHelpers_InventorySummary() public {
+        uint256 productId = _createProductAsSeller();
 
-        vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.EmptyValue.selector);
-        store.deliver(id, buyerPubKey, "");
+        string[] memory cids = new string[](2);
+        cids[0] = "ipfs://cid-1";
+        cids[1] = "ipfs://cid-2";
+        _addItemsAsSeller(productId, cids);
+
+        _assertInventory(productId, 2, 0, 2, false);
+
+        _buyAs(productId, buyer, buyerPubKey);
+
+        _assertInventory(productId, 2, 1, 1, false);
+
+        _buyAs(productId, buyer2, buyer2PubKey);
+
+        _assertInventory(productId, 2, 2, 0, true);
+        assertEq(store.isProductSoldOut(productId), true);
     }
 }

@@ -3,256 +3,315 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title ZkRevealStore (Trusted Seller v0 - Delivery Escrow)
-/// @notice Seller lists an encrypted content CID + key commitment. Buyer pays escrow.
-///         Seller is paid only after posting EK ciphertext on-chain before deadline.
-/// @dev Seller is trusted to provide correct EK. Contract enforces escrow + deadline refund.
+/// @title ZkRevealStore
+/// @notice Inventory-based encrypted delivery escrow.
+/// @dev Seller creates products, adds per-unit items, buyer purchases product units, and escrow is order-based.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
 
-    enum State {
-        Listed,
-        Paid, // buyer paid, waiting for seller EK
-        Committed, // EK ciphertext posted, seller paid
-        Refunded,
-        Cancelled
+    enum EscrowStatus {
+        Pending,
+        Delivered,
+        Reclaimed
     }
 
-    struct Item {
-        bool exists;
+    struct Product {
+        address seller;
+        string title;
+        uint256 unitPrice;
+        uint64 refundWindow;
+        bool active;
+        uint256 nextItemIndex;
+        uint256 totalItems;
+        uint256 soldItems;
+    }
 
+    struct ProductItem {
+        uint256 productId;
+        string contentCID;
+        bool consumed;
+    }
+
+    struct Escrow {
+        bool exists;
+        uint256 productId;
+        uint256 itemId;
         address seller;
         address buyer;
-
-        uint256 priceWei;
-        string contentCID; // public CID/pointer to encrypted content blob
-        bytes32 contentCIDHash; // commitment to contentCID bytes
-        bytes32 kHash; // mandatory commitment keccak256(K || salt)
-
-        bytes32 buyerPubKeyHash; // keccak256(buyerPubKey) captured at buy()
-        uint64 deadline; // refund deadline (unix time)
-        State state;
-
-        bytes32 ekHash; // keccak256(ekCiphertext)
-        bytes32 deliveryReceiptHash; // keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))
-        bytes ekCiphertext; // encrypted (K||salt) for buyer
+        uint256 amount;
+        bytes buyerPubKey;
+        bytes encryptedKey;
+        uint64 createdAt;
+        uint64 deadline;
+        EscrowStatus status;
     }
 
+    uint256 public nextProductId = 1;
     uint256 public nextItemId = 1;
-    mapping(uint256 => Item) private items;
+    uint256 public nextEscrowId = 1;
 
-    event ItemCreated(
-        uint256 indexed itemId,
-        address indexed seller,
-        uint256 priceWei,
-        bytes32 contentCIDHash,
-        bytes32 kHash
+    mapping(uint256 => Product) public products;
+    mapping(uint256 => ProductItem) public productItems;
+    mapping(uint256 => Escrow) public escrows;
+
+    mapping(address => uint256[]) public productsBySeller;
+    mapping(uint256 => uint256[]) public productItemIds;
+
+    event ProductCreated(
+        uint256 indexed productId, address indexed seller, string title, uint256 unitPrice, uint64 refundWindow
     );
 
-    event ItemCancelled(uint256 indexed itemId);
+    event ProductItemsAdded(uint256 indexed productId, uint256 count);
 
-    /// @notice Raw buyer pubkey is not emitted/stored; only hash is recorded.
-    event ItemBought(
+    event ProductStatusChanged(uint256 indexed productId, bool active);
+
+    event EscrowCreated(
+        uint256 indexed escrowId,
+        uint256 indexed productId,
         uint256 indexed itemId,
-        address indexed buyer,
-        uint256 priceWei,
-        uint64 deadline,
-        bytes32 buyerPubKeyHash
+        address seller,
+        address buyer,
+        uint256 amount
     );
 
-    event ItemDelivered(uint256 indexed itemId, bytes32 ekHash, bytes32 deliveryReceiptHash);
-    event ItemRefunded(uint256 indexed itemId, address indexed buyer, uint256 amountWei);
+    event EscrowDelivered(uint256 indexed escrowId);
 
+    event EscrowReclaimed(uint256 indexed escrowId);
+
+    error ProductNotFound();
     error ItemNotFound();
-    error NotSeller();
-    error NotBuyer();
+    error EscrowNotFound();
+    error NotProductSeller();
+    error NotEscrowSeller();
+    error NotEscrowBuyer();
+    error ProductInactive();
+    error SoldOut();
     error BadState();
     error BadPrice();
     error InvalidParams();
     error DeadlineNotPassed();
     error DeadlinePassed();
     error EmptyValue();
-    error BuyerPubKeyMismatch();
     error PayFail();
     error RefundFail();
+
+    modifier productExists(uint256 productId) {
+        _productExists(productId);
+        _;
+    }
+
+    modifier escrowExists(uint256 escrowId) {
+        _escrowExists(escrowId);
+        _;
+    }
 
     modifier itemExists(uint256 itemId) {
         _itemExists(itemId);
         _;
     }
 
+    function _productExists(uint256 productId) internal view {
+        if (products[productId].seller == address(0)) revert ProductNotFound();
+    }
+
+    function _escrowExists(uint256 escrowId) internal view {
+        if (!escrows[escrowId].exists) revert EscrowNotFound();
+    }
+
     function _itemExists(uint256 itemId) internal view {
-        if (!items[itemId].exists) revert ItemNotFound();
+        if (productItems[itemId].productId == 0) revert ItemNotFound();
     }
 
-    modifier onlySeller(uint256 itemId) {
-        if (items[itemId].seller != msg.sender) revert NotSeller();
-        _;
+    function _onlyProductSeller(uint256 productId) internal view {
+        if (products[productId].seller != msg.sender) revert NotProductSeller();
     }
 
-    modifier onlyBuyer(uint256 itemId) {
-        if (items[itemId].buyer != msg.sender) revert NotBuyer();
-        _;
+    function _onlyEscrowSeller(uint256 escrowId) internal view {
+        if (escrows[escrowId].seller != msg.sender) revert NotEscrowSeller();
     }
 
-    function createItem(uint256 priceWei, string calldata contentCID, bytes32 contentCIDHash, bytes32 kHash)
+    function _onlyEscrowBuyer(uint256 escrowId) internal view {
+        if (escrows[escrowId].buyer != msg.sender) revert NotEscrowBuyer();
+    }
+
+    function createProduct(string calldata title, uint256 unitPrice, uint64 refundWindow)
         external
-        returns (uint256 itemId)
+        returns (uint256 productId)
     {
-        if (priceWei == 0) revert InvalidParams();
-        if (bytes(contentCID).length == 0) revert InvalidParams();
-        if (contentCIDHash == bytes32(0)) revert InvalidParams();
-        if (keccak256(bytes(contentCID)) != contentCIDHash) revert InvalidParams();
-        if (kHash == bytes32(0)) revert InvalidParams();
+        if (bytes(title).length == 0) revert InvalidParams();
+        if (unitPrice == 0) revert InvalidParams();
+        if (refundWindow < MIN_REFUND_WINDOW || refundWindow > MAX_REFUND_WINDOW) revert InvalidParams();
 
-        itemId = nextItemId++;
+        productId = nextProductId++;
 
-        Item storage it = items[itemId];
-        it.exists = true;
+        Product storage product = products[productId];
+        product.seller = msg.sender;
+        product.title = title;
+        product.unitPrice = unitPrice;
+        product.refundWindow = refundWindow;
+        product.active = true;
+        product.nextItemIndex = 0;
+        product.totalItems = 0;
+        product.soldItems = 0;
 
-        it.seller = msg.sender;
-        it.buyer = address(0);
-        it.priceWei = priceWei;
-        it.contentCID = contentCID;
-        it.contentCIDHash = contentCIDHash;
-        it.kHash = kHash;
-        it.buyerPubKeyHash = bytes32(0);
-        it.deadline = 0;
-        it.state = State.Listed;
-        it.ekHash = bytes32(0);
-        it.deliveryReceiptHash = bytes32(0);
-        it.ekCiphertext = "";
+        productsBySeller[msg.sender].push(productId);
 
-        emit ItemCreated(itemId, msg.sender, priceWei, contentCIDHash, kHash);
+        emit ProductCreated(productId, msg.sender, title, unitPrice, refundWindow);
     }
 
-    /// @notice Seller may cancel before purchase.
-    function cancelItem(uint256 itemId) external itemExists(itemId) onlySeller(itemId) {
-        Item storage it = items[itemId];
-        if (it.state != State.Listed) revert BadState();
-        it.state = State.Cancelled;
-        emit ItemCancelled(itemId);
+    function addItemsToProduct(uint256 productId, string[] calldata contentCIDs) external productExists(productId) {
+        _onlyProductSeller(productId);
+        if (contentCIDs.length == 0) revert InvalidParams();
+
+        Product storage product = products[productId];
+
+        for (uint256 i = 0; i < contentCIDs.length; i++) {
+            string calldata cid = contentCIDs[i];
+            if (bytes(cid).length == 0) revert InvalidParams();
+
+            uint256 itemId = nextItemId++;
+
+            ProductItem storage productItem = productItems[itemId];
+            productItem.productId = productId;
+            productItem.contentCID = cid;
+            productItem.consumed = false;
+
+            productItemIds[productId].push(itemId);
+            product.totalItems += 1;
+        }
+
+        emit ProductItemsAdded(productId, contentCIDs.length);
     }
 
-    /// @notice Buyer purchases item and provides raw buyer pubkey (public calldata); contract stores only hash.
-    /// @param refundWindowSeconds how long buyer is willing to wait for EK delivery before being able to refund.
-    function buy(uint256 itemId, bytes calldata buyerPubKey, uint64 refundWindowSeconds)
+    function setProductActive(uint256 productId, bool active) external productExists(productId) {
+        _onlyProductSeller(productId);
+        products[productId].active = active;
+        emit ProductStatusChanged(productId, active);
+    }
+
+    function _allocateNextProductItem(uint256 productId) internal returns (uint256 itemId) {
+        Product storage product = products[productId];
+
+        if (!product.active) revert ProductInactive();
+
+        uint256[] storage productItemIdList = productItemIds[productId];
+        if (product.nextItemIndex >= productItemIdList.length) revert SoldOut();
+
+        itemId = productItemIdList[product.nextItemIndex];
+        product.nextItemIndex += 1;
+
+        ProductItem storage productItem = productItems[itemId];
+        if (productItem.productId != productId) revert BadState();
+        if (productItem.consumed) revert BadState();
+
+        productItem.consumed = true;
+        product.soldItems += 1;
+    }
+
+    function createEscrow(uint256 productId, bytes calldata buyerPubKey)
         external
         payable
-        itemExists(itemId)
+        productExists(productId)
+        returns (uint256 escrowId)
     {
-        Item storage it = items[itemId];
-        if (it.state != State.Listed) revert BadState();
-        if (msg.value != it.priceWei) revert BadPrice();
+        Product storage product = products[productId];
+
+        if (!product.active) revert ProductInactive();
         if (buyerPubKey.length == 0) revert InvalidParams();
-        if (refundWindowSeconds < MIN_REFUND_WINDOW || refundWindowSeconds > MAX_REFUND_WINDOW) revert InvalidParams();
+        if (msg.value != product.unitPrice) revert BadPrice();
 
-        it.buyer = msg.sender;
-        it.buyerPubKeyHash = keccak256(buyerPubKey);
-        it.deadline = uint64(block.timestamp) + refundWindowSeconds;
-        it.state = State.Paid;
+        uint256 itemId = _allocateNextProductItem(productId);
 
-        emit ItemBought(itemId, msg.sender, it.priceWei, it.deadline, it.buyerPubKeyHash);
+        escrowId = nextEscrowId++;
+
+        Escrow storage escrow = escrows[escrowId];
+        escrow.exists = true;
+        escrow.productId = productId;
+        escrow.itemId = itemId;
+        escrow.seller = product.seller;
+        escrow.buyer = msg.sender;
+        escrow.amount = product.unitPrice;
+        escrow.buyerPubKey = buyerPubKey;
+        escrow.encryptedKey = "";
+        escrow.createdAt = uint64(block.timestamp);
+        escrow.deadline = uint64(block.timestamp) + product.refundWindow;
+        escrow.status = EscrowStatus.Pending;
+
+        emit EscrowCreated(escrowId, productId, itemId, product.seller, msg.sender, product.unitPrice);
     }
 
-    /// @notice Seller posts actual EK ciphertext on-chain and gets paid.
-    /// @dev Requires matching buyer pubkey hash to avoid arbitrary delivery data.
-    function deliver(uint256 itemId, bytes calldata buyerPubKey, bytes calldata ekCiphertext)
-        external
-        itemExists(itemId)
-        onlySeller(itemId)
-        nonReentrant
-    {
-        Item storage it = items[itemId];
-        if (it.state != State.Paid) revert BadState();
-        if (buyerPubKey.length == 0) revert InvalidParams();
-        if (keccak256(buyerPubKey) != it.buyerPubKeyHash) revert BuyerPubKeyMismatch();
-        if (ekCiphertext.length == 0) revert EmptyValue();
-        if (block.timestamp > it.deadline) revert DeadlinePassed();
+    function deliverEscrow(uint256 escrowId, bytes calldata encryptedKey) external escrowExists(escrowId) nonReentrant {
+        _onlyEscrowSeller(escrowId);
 
-        it.ekHash = keccak256(ekCiphertext);
-        it.deliveryReceiptHash = keccak256(abi.encode(itemId, it.buyer, it.buyerPubKeyHash, ekCiphertext));
-        it.ekCiphertext = ekCiphertext;
-        it.state = State.Committed;
+        Escrow storage escrow = escrows[escrowId];
+        if (escrow.status != EscrowStatus.Pending) revert BadState();
+        if (encryptedKey.length == 0) revert EmptyValue();
+        if (block.timestamp > escrow.deadline) revert DeadlinePassed();
 
-        (bool ok,) = it.seller.call{value: it.priceWei}("");
+        escrow.encryptedKey = encryptedKey;
+        escrow.status = EscrowStatus.Delivered;
+
+        (bool ok,) = escrow.seller.call{value: escrow.amount}("");
         if (!ok) revert PayFail();
 
-        emit ItemDelivered(itemId, it.ekHash, it.deliveryReceiptHash);
+        emit EscrowDelivered(escrowId);
     }
 
-    /// @notice Buyer refunds only if seller did not deliver EK ciphertext by deadline.
-    function refund(uint256 itemId) external itemExists(itemId) onlyBuyer(itemId) nonReentrant {
-        Item storage it = items[itemId];
-        if (it.state != State.Paid) revert BadState();
-        if (block.timestamp <= it.deadline) revert DeadlineNotPassed();
+    function reclaimEscrow(uint256 escrowId) external escrowExists(escrowId) nonReentrant {
+        _onlyEscrowBuyer(escrowId);
 
-        it.state = State.Refunded;
+        Escrow storage escrow = escrows[escrowId];
+        if (escrow.status != EscrowStatus.Pending) revert BadState();
+        if (block.timestamp <= escrow.deadline) revert DeadlineNotPassed();
 
-        (bool ok,) = it.buyer.call{value: it.priceWei}("");
+        escrow.status = EscrowStatus.Reclaimed;
+
+        (bool ok,) = escrow.buyer.call{value: escrow.amount}("");
         if (!ok) revert RefundFail();
 
-        emit ItemRefunded(itemId, it.buyer, it.priceWei);
+        emit EscrowReclaimed(escrowId);
     }
 
-    // ===== Getters (UI + off-chain verification) =====
-
-    function getState(uint256 itemId) external view itemExists(itemId) returns (State) {
-        return items[itemId].state;
+    function getProductsBySeller(address seller) external view returns (uint256[] memory) {
+        return productsBySeller[seller];
     }
 
-    function getBuyerPubKeyHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].buyerPubKeyHash;
+    function getProductItemIds(uint256 productId) external view productExists(productId) returns (uint256[] memory) {
+        return productItemIds[productId];
     }
 
-    function getEkHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].ekHash;
+    function getProductRemainingItems(uint256 productId) public view productExists(productId) returns (uint256) {
+        Product storage product = products[productId];
+        return product.totalItems - product.soldItems;
     }
 
-    function getDeliveryReceiptHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].deliveryReceiptHash;
+    function isProductSoldOut(uint256 productId) public view productExists(productId) returns (bool) {
+        return getProductRemainingItems(productId) == 0;
     }
 
-    function getEkCiphertext(uint256 itemId) external view itemExists(itemId) returns (bytes memory) {
-        return items[itemId].ekCiphertext;
-    }
-
-    /// @notice Canonical receipt hash for off-chain EK delivery verification.
-    /// @dev Recommended preimage:
-    ///      keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext))
-    function hashDeliveryReceipt(uint256 itemId, address buyer, bytes32 buyerPubKeyHash, bytes calldata ekCiphertext)
-        external
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(itemId, buyer, buyerPubKeyHash, ekCiphertext));
-    }
-
-    function getContentCID(uint256 itemId) external view itemExists(itemId) returns (string memory) {
-        return items[itemId].contentCID;
-    }
-
-    function getContentCIDHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].contentCIDHash;
-    }
-
-    function getKHash(uint256 itemId) external view itemExists(itemId) returns (bytes32) {
-        return items[itemId].kHash;
-    }
-
-    function getDeadline(uint256 itemId) external view itemExists(itemId) returns (uint64) {
-        return items[itemId].deadline;
-    }
-
-    /// @notice UI-friendly aggregate getter.
-    function getItem(uint256 itemId)
+    function getProductInventorySummary(uint256 productId)
         external
         view
-        itemExists(itemId)
-        returns (address seller, address buyer, uint256 priceWei, uint64 deadline, State state)
+        productExists(productId)
+        returns (uint256 totalItems, uint256 soldItems, uint256 remainingItems, bool soldOut)
     {
-        Item storage it = items[itemId];
-        return (it.seller, it.buyer, it.priceWei, it.deadline, it.state);
+        Product storage product = products[productId];
+        totalItems = product.totalItems;
+        soldItems = product.soldItems;
+        remainingItems = product.totalItems - product.soldItems;
+        soldOut = remainingItems == 0;
+    }
+
+    function getProduct(uint256 productId) external view productExists(productId) returns (Product memory) {
+        return products[productId];
+    }
+
+    function getProductItem(uint256 itemId) external view itemExists(itemId) returns (ProductItem memory) {
+        return productItems[itemId];
+    }
+
+    function getEscrow(uint256 escrowId) external view escrowExists(escrowId) returns (Escrow memory) {
+        return escrows[escrowId];
     }
 }
