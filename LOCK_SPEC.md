@@ -1,13 +1,15 @@
-# ZkReveal v1 Lock Spec (Inventory Model)
+# zkReveal Lock Spec (Inventory + Escrow)
 
-This file locks the inventory-based design:
+This file freezes the current v0 architecture and naming for `ZkRevealStore`.
 
-- Seller address is business identity
-- Product is a reusable listing with per-item price
-- ProductItem is one inventory unit under product
-- Escrow is one purchase lifecycle bound to one allocated item
+## Locked Model
 
-## Core Architecture
+- Seller identity is `address`.
+- `Product` is the reusable listing and price source.
+- `ProductItem` is one inventory unit under a product.
+- `Escrow` is one purchase lifecycle tied to exactly one allocated product item.
+
+Core storage relations:
 
 - `products[productId]`
 - `productItems[itemId]`
@@ -15,74 +17,188 @@ This file locks the inventory-based design:
 - `productsBySeller[seller]`
 - `productItemIds[productId]`
 
-## Product Rules
+ID counters:
 
-`createProduct(title, unitPrice, refundWindow)` requires:
+- `nextProductId`
+- `nextItemId`
+- `nextEscrowId`
 
-- non-empty `title`
-- `unitPrice > 0`
-- `refundWindow` within `[MIN_REFUND_WINDOW, MAX_REFUND_WINDOW]`
+## Locked Invariants
 
-Product semantics:
+1. Buyer purchases a product, never picks an item id directly.
+2. Item allocation is sequential via `product.nextItemIndex`.
+3. Once allocated, a `ProductItem` is permanently `consumed = true` (no recycling on reclaim).
+4. Escrow lifecycle is single path: `Pending -> Delivered` or `Pending -> Reclaimed`.
+5. Funds only leave contract through `deliverEscrow` (to seller) or `reclaimEscrow` (to buyer).
+6. Window bounds are enforced globally:
+   - `MIN_REFUND_WINDOW = 5 minutes`
+   - `MAX_REFUND_WINDOW = 30 days`
 
-- `unitPrice` is per-item price
-- `active` controls purchasability
-- `nextItemIndex` drives sequential allocation
-- `totalItems` = items ever added
-- `soldItems` = items ever allocated/consumed
+## Product Semantics
 
-## ProductItem Rules
+`Product.unitPrice` is per-item price.  
+`Product.totalItems` counts all items ever added.  
+`Product.soldItems` counts all allocated/consumed items.  
+`Product.active` gates new escrow creation only.
 
-`addItemsToProduct(productId, contentCIDs[])`:
+## Function Contract (Inputs and State Usage)
 
-- seller-only
-- append-only
-- each CID must be non-empty
-- each added item has `consumed = false`
+### `createProduct(title, unitPrice, refundWindow) -> productId`
 
-Allocation via `_allocateNextProductItem(productId)`:
+Inputs:
 
-- sequential only
-- marks selected item `consumed = true`
-- increments `nextItemIndex` and `soldItems`
-- no recycling
+- `title`
+- `unitPrice`
+- `refundWindow`
 
-## Purchase / Escrow Rules
+Validation:
 
-`createEscrow(productId, buyerPubKey)`:
+- title non-empty
+- unitPrice > 0
+- refundWindow in `[MIN_REFUND_WINDOW, MAX_REFUND_WINDOW]`
 
-- buyer buys product (not item)
-- exact payment `msg.value == unitPrice`
-- product must be active and not sold out
-- buyer pubkey must be non-empty
-- contract allocates item internally
-- escrow stores exact `productId` and `itemId`
-- escrow starts in `Pending`
+Writes:
 
-`deliverEscrow(escrowId, encryptedKey)`:
+- creates `products[productId]`
+- appends `productId` to `productsBySeller[msg.sender]`
 
-- escrow seller only
-- only `Pending`
-- before deadline
-- non-empty payload
-- sets `encryptedKey`
-- state -> `Delivered`
-- pays seller
+Emits:
 
-`reclaimEscrow(escrowId)`:
+- `ProductCreated`
 
-- escrow buyer only
-- only `Pending`
-- after deadline
-- state -> `Reclaimed`
-- refunds buyer
-- consumed item remains consumed
+### `addItemsToProduct(productId, contentCIDs[])`
+
+Inputs:
+
+- `productId`
+- `contentCIDs`
+
+Validation:
+
+- product exists
+- caller is product seller
+- array length > 0
+- each CID non-empty
+
+Writes:
+
+- creates new `productItems[itemId]` entries
+- appends each `itemId` to `productItemIds[productId]`
+- increments `products[productId].totalItems`
+
+Emits:
+
+- `ProductItemsAdded`
+
+### `setProductActive(productId, active)`
+
+Inputs:
+
+- `productId`
+- `active`
+
+Validation:
+
+- product exists
+- caller is product seller
+
+Writes:
+
+- `products[productId].active`
+
+Emits:
+
+- `ProductStatusChanged`
+
+### `createEscrow(productId, buyerPubKey) payable -> escrowId`
+
+Inputs:
+
+- `productId`
+- `buyerPubKey`
+- `msg.value`
+
+Validation:
+
+- product exists
+- product active
+- buyerPubKey non-empty
+- `msg.value == products[productId].unitPrice`
+- inventory available through `_allocateNextProductItem`
+
+Writes:
+
+- allocates item id sequentially
+- marks allocated `productItems[itemId].consumed = true`
+- increments `products[productId].nextItemIndex`
+- increments `products[productId].soldItems`
+- creates `escrows[escrowId]` with:
+  - `productId`, `itemId`, `seller`, `buyer`, `amount`
+  - `buyerPubKey`, `encryptedKey = ""`
+  - `createdAt`, `deadline`, `status = Pending`
+
+Emits:
+
+- `EscrowCreated`
+
+### `deliverEscrow(escrowId, encryptedKey)`
+
+Inputs:
+
+- `escrowId`
+- `encryptedKey`
+
+Validation:
+
+- escrow exists
+- caller is escrow seller
+- escrow status is `Pending`
+- `encryptedKey` non-empty
+- before escrow deadline
+
+Writes:
+
+- stores `escrow.encryptedKey`
+- sets `escrow.status = Delivered`
+
+External transfer:
+
+- transfers `escrow.amount` to seller
+
+Emits:
+
+- `EscrowDelivered`
+
+### `reclaimEscrow(escrowId)`
+
+Inputs:
+
+- `escrowId`
+
+Validation:
+
+- escrow exists
+- caller is escrow buyer
+- escrow status is `Pending`
+- current time strictly after deadline
+
+Writes:
+
+- sets `escrow.status = Reclaimed`
+
+External transfer:
+
+- refunds `escrow.amount` to buyer
+
+Emits:
+
+- `EscrowReclaimed`
 
 ## Locked Events
 
-- `ProductCreated(productId, seller, title, unitPrice, refundWindow)`
-- `ProductItemsAdded(productId, count)`
-- `ProductStatusChanged(productId, active)`
-- `EscrowCreated(escrowId, productId, itemId, seller, buyer, amount)`
-- `EscrowDelivered(escrowId)`
-- `EscrowReclaimed(escrowId)`
+- `ProductCreated(uint256,address,string,uint256,uint64)`
+- `ProductItemsAdded(uint256,uint256)`
+- `ProductStatusChanged(uint256,bool)`
+- `EscrowCreated(uint256,uint256,uint256,address,address,uint256)`
+- `EscrowDelivered(uint256)`
+- `EscrowReclaimed(uint256)`

@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @title ZkRevealStore
 /// @notice Inventory-based encrypted delivery escrow.
-/// @dev Seller creates products, adds per-unit items, buyer purchases product units, and escrow is order-based.
+/// @dev Sellers create products, add per-unit inventory items, buyers create escrows for product units, and settlement is escrow-based.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
@@ -235,7 +235,7 @@ contract ZkRevealStore is ReentrancyGuard {
         escrow.buyerPubKey = buyerPubKey;
         escrow.encryptedKey = "";
         escrow.createdAt = uint64(block.timestamp);
-        escrow.deadline = uint64(block.timestamp) + product.refundWindow;
+        escrow.deadline = escrow.createdAt + product.refundWindow;
         escrow.status = EscrowStatus.Pending;
 
         emit EscrowCreated(escrowId, productId, itemId, product.seller, msg.sender, product.unitPrice);

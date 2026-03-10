@@ -1,198 +1,185 @@
-## Foundry
+# zkReveal
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Inventory-based encrypted delivery escrow in Solidity (Foundry project).
 
-Foundry consists of:
+## Current Design (v0)
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+zkReveal uses a hierarchical model:
 
-## Documentation
+- `Product`: reusable listing with shared metadata and per-unit price.
+- `ProductItem`: one inventory unit under a product, each with its own `contentCID`.
+- `Escrow`: one buyer purchase tied to exactly one allocated product item.
 
-https://book.getfoundry.sh/
+Seller identity is the seller wallet address.
 
-## Usage
+## Core Contract
 
-### Build
+- `src/ZkRevealStore.sol`
 
-```shell
-$ forge build
-```
+Key storage:
 
-### Test
+- `products[productId]`
+- `productItems[itemId]`
+- `escrows[escrowId]`
+- `productsBySeller[seller]`
+- `productItemIds[productId]`
 
-```shell
-$ forge test
-```
+Escrow status:
 
-### Format
+- `Pending`
+- `Delivered`
+- `Reclaimed`
 
-```shell
-$ forge fmt
-```
+## High-Level Flows
 
-### Gas Snapshots
+### Seller flow
 
-```shell
-$ forge snapshot
-```
+1. Create product via `createProduct(title, unitPrice, refundWindow)`.
+2. Add inventory CIDs via `addItemsToProduct(productId, contentCIDs)`.
+3. Buyer creates escrow via `createEscrow`.
+4. Seller submits encrypted delivery key via `deliverEscrow(escrowId, encryptedKey)`.
+5. Contract pays seller immediately on successful delivery submission.
 
-### Anvil
+### Buyer flow
 
-```shell
-$ anvil
-```
+1. Generate buyer encryption keypair off-chain.
+2. Call `createEscrow(productId, buyerPubKey)` and pay exact `unitPrice`.
+3. Wait for seller delivery; read `escrow.encryptedKey` from `getEscrow`.
+4. Decrypt content key off-chain and use allocated item `contentCID`.
+5. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
 
-### Deploy
+## Function Interface and Data Use
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+### `createProduct(string title, uint256 unitPrice, uint64 refundWindow)`
 
-### Cast
+Inputs:
 
-```shell
-$ cast <subcommand>
-```
+- `title`: listing name
+- `unitPrice`: price per item
+- `refundWindow`: escrow reclaim window
 
-### Help
+Uses:
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+- validates non-empty title, non-zero price, and refund window bounds
 
-# zkReveal — v0 (Trusted Seller Delivery Escrow)
+Writes:
 
-zkReveal v0 is a minimal, production-minded escrow rail for **encrypted digital delivery**.
+- new `Product`
+- `productsBySeller[msg.sender]`
 
-- A **seller** lists an **encrypted content CID** (public) + a commitment to the symmetric key (`kHash`).
-- A **buyer** pays escrow and provides a public encryption key (only its hash is stored).
-- The **seller** must deliver **EK ciphertext** (encrypted `(K || salt)` for the buyer) **on-chain before the deadline** to get paid.
-- If the seller does not deliver in time, the **buyer refunds** after the deadline.
+### `addItemsToProduct(uint256 productId, string[] contentCIDs)`
 
-This is a **Trusted Seller** design (v0): the contract enforces payment flow + deadlines, but does **not** prove the seller delivered a *correct* key.
+Inputs:
 
----
+- `productId`
+- `contentCIDs`: per-unit encrypted content pointers
 
-## Contract
+Uses:
 
-- `ZkRevealStore.sol`
-  - Listing → escrow purchase → delivery → payout
-  - Deadline-based refund when delivery doesn’t happen
+- caller must be product seller
+- every CID must be non-empty
 
-### State machine
+Writes:
 
-- `Listed` → `Paid` → `Committed`
-- `Listed` → `Cancelled`
-- `Paid` → `Refunded`
+- appends `ProductItem` rows
+- appends to `productItemIds[productId]`
+- increments product `totalItems`
 
-Once `Committed/Cancelled/Refunded`, the item is locked.
+### `setProductActive(uint256 productId, bool active)`
 
----
+Inputs:
 
-## Public vs private data (v0)
+- `productId`
+- `active`
 
-### Stored on-chain
+Uses:
 
-- `contentCID` (string): **public pointer** to the encrypted content blob (e.g. IPFS CID)
-- `contentCIDHash`: `keccak256(bytes(contentCID))`
-- `kHash`: commitment to the symmetric key: `keccak256(K || salt)`
-- `buyerPubKeyHash`: `keccak256(buyerPubKey)`
-- `deadline` and `state`
-- `ekCiphertext`: encrypted payload for buyer containing `(K || salt)`
-- `ekHash` and `deliveryReceiptHash`
+- caller must be product seller
 
-### NOT stored on-chain
+Writes:
 
-- plaintext content
-- symmetric key `K` or `salt`
-- buyer private key
+- product availability flag
 
----
+### `createEscrow(uint256 productId, bytes buyerPubKey) payable`
 
-## Flow
+Inputs:
 
-### Seller (happy path)
+- `productId`
+- `buyerPubKey`
+- `msg.value`
 
-1) **Encrypt content off-chain**
-   - Generate `K` + `salt`
-   - `kHash = keccak256(abi.encodePacked(K, salt))`
-   - `contentCipher = Encrypt(contentPlain, K)`
-   - Upload `contentCipher` to IPFS → `contentCID`
-   - `contentCIDHash = keccak256(bytes(contentCID))`
+Uses:
 
-2) **List**
-   - Call `createItem(priceWei, contentCID, contentCIDHash, kHash)`
+- product must be active with available inventory
+- `msg.value` must equal product `unitPrice`
+- internally calls `_allocateNextProductItem(productId)` (sequential allocation)
 
-3) **After buyer pays**, compute delivery payload
-   - Read `buyerPubKey` from the buy tx calldata
-   - `ekCiphertext = EncryptToBuyerPubKey(buyerPubKey, (K || salt))`
+Writes:
 
-4) **Deliver + get paid**
-   - Call `deliver(itemId, buyerPubKey, ekCiphertext)` before `deadline`
+- marks one `ProductItem` as `consumed`
+- creates `Escrow` with product/item linkage, buyer/seller, amount, key, timestamps, deadline, status
 
-### Buyer (happy path)
+### `deliverEscrow(uint256 escrowId, bytes encryptedKey)`
 
-1) **Generate keypair**
-   - Create `buyerPubKey` / `buyerPrivKey`
+Inputs:
 
-2) **Buy**
-   - Call `buy(itemId, buyerPubKey, refundWindowSeconds)` and pay exact `priceWei`
+- `escrowId`
+- `encryptedKey`
 
-3) **Wait for delivery**
-   - When state becomes `Committed`, read `ekCiphertext` via `getEkCiphertext(itemId)`
+Uses:
 
-4) **Decrypt K and verify**
-   - Decrypt `ekCiphertext` with `buyerPrivKey` → obtain `(K, salt)`
-   - Verify: `keccak256(abi.encodePacked(K, salt)) == kHash`
+- caller must be escrow seller
+- escrow must be `Pending`
+- must be before deadline
 
-5) **Fetch & decrypt content**
-   - Fetch encrypted content from `contentCID`
-   - Decrypt with `K`
+Writes:
 
-### Refund
+- stores `encryptedKey`
+- sets escrow status to `Delivered`
+- transfers escrow amount to seller
 
-- If seller does not deliver by `deadline`, buyer calls `refund(itemId)` after deadline.
+### `reclaimEscrow(uint256 escrowId)`
 
----
+Inputs:
 
-## Local development (Foundry)
+- `escrowId`
 
-### Build
+Uses:
+
+- caller must be escrow buyer
+- escrow must be `Pending`
+- deadline must have passed
+
+Writes:
+
+- sets escrow status to `Reclaimed`
+- refunds escrow amount to buyer
+- inventory is not restored
+
+## Events
+
+- `ProductCreated`
+- `ProductItemsAdded`
+- `ProductStatusChanged`
+- `EscrowCreated`
+- `EscrowDelivered`
+- `EscrowReclaimed`
+
+## Deployments
+
+### Sonic Testnet
+
+- Chain ID: `14601`
+- ZkRevealStore: `0x7f5c1f1D8F0EB3c4eE0fBad239936D2B0BA093f1`
+- Tx: `0x8662f52b5b56e020597db48c1930ec243fad46e22708f49d00764c0f1337c36c`
+- Block: `12692107`
+- Compiler: `0.8.24`
+- EVM Version: `paris`
+
+## Development
 
 ```bash
 forge build
+forge fmt --check
+forge test --offline
 ```
-
-### Test
-
-```bash
-forge test
-```
-
-### Format
-
-```bash
-forge fmt
-```
-
-### Gas snapshot
-
-```bash
-forge snapshot
-```
-
----
-
-## Notes
-
-- v0 assumes **trusted sellers** (gateway mode). The contract guarantees:
-  - escrow safety
-  - delivery-or-refund via deadline
-  - on-chain availability of `ekCiphertext`
-
-- Future versions may add stronger guarantees (e.g., proofs / dispute mechanisms / additional commitments), but v0 is intentionally minimal.
