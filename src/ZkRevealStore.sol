@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @title ZkRevealStore
 /// @notice Inventory-based encrypted delivery escrow for trusted-seller v0.
-/// @dev Sellers create products, add inventory units, buyers create escrows for product units, and settlement is escrow-based.
+/// @dev Sellers create listings, add inventory units, buyers create escrows for listing units, and settlement is escrow-based.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
@@ -16,27 +16,27 @@ contract ZkRevealStore is ReentrancyGuard {
         Reclaimed
     }
 
-    struct Product {
+    struct Listing {
         address seller;
         string title;
         uint256 unitPrice;
         uint64 refundWindow;
         bool active;
-        uint256 nextItemIndex;
-        uint256 totalItems;
-        uint256 soldItems;
+        uint256 nextInventoryUnitIndex;
+        uint256 totalInventoryUnits;
+        uint256 soldInventoryUnits;
     }
 
-    struct ProductItem {
-        uint256 productId;
+    struct InventoryUnit {
+        uint256 listingId;
         string contentCID;
         bool consumed;
     }
 
     struct Escrow {
         bool exists;
-        uint256 productId;
-        uint256 itemId;
+        uint256 listingId;
+        uint256 inventoryUnitId;
         address seller;
         address buyer;
         uint256 amount;
@@ -47,29 +47,29 @@ contract ZkRevealStore is ReentrancyGuard {
         EscrowStatus status;
     }
 
-    uint256 public nextProductId = 1;
-    uint256 public nextItemId = 1;
+    uint256 public nextListingId = 1;
+    uint256 public nextInventoryUnitId = 1;
     uint256 public nextEscrowId = 1;
 
-    mapping(uint256 => Product) public products;
-    mapping(uint256 => ProductItem) public productItems;
+    mapping(uint256 => Listing) public listings;
+    mapping(uint256 => InventoryUnit) public inventoryUnits;
     mapping(uint256 => Escrow) public escrows;
 
-    mapping(address => uint256[]) public productsBySeller;
-    mapping(uint256 => uint256[]) public productItemIds;
+    mapping(address => uint256[]) public listingsBySeller;
+    mapping(uint256 => uint256[]) public listingInventoryUnitIds;
 
-    event ProductCreated(
-        uint256 indexed productId, address indexed seller, string title, uint256 unitPrice, uint64 refundWindow
+    event ListingCreated(
+        uint256 indexed listingId, address indexed seller, string title, uint256 unitPrice, uint64 refundWindow
     );
 
-    event ProductItemsAdded(uint256 indexed productId, uint256 count);
+    event InventoryUnitAdded(uint256 indexed listingId, uint256 count);
 
-    event ProductStatusChanged(uint256 indexed productId, bool active);
+    event ListingStatusChanged(uint256 indexed listingId, bool active);
 
     event EscrowCreated(
         uint256 indexed escrowId,
-        uint256 indexed productId,
-        uint256 indexed itemId,
+        uint256 indexed listingId,
+        uint256 indexed inventoryUnitId,
         address seller,
         address buyer,
         uint256 amount
@@ -79,13 +79,13 @@ contract ZkRevealStore is ReentrancyGuard {
 
     event EscrowReclaimed(uint256 indexed escrowId);
 
-    error ProductNotFound();
-    error ItemNotFound();
+    error ListingNotFound();
+    error InventoryUnitNotFound();
     error EscrowNotFound();
-    error NotProductSeller();
+    error NotListingSeller();
     error NotEscrowSeller();
     error NotEscrowBuyer();
-    error ProductInactive();
+    error ListingInactive();
     error SoldOut();
     error BadState();
     error BadPrice();
@@ -96,8 +96,8 @@ contract ZkRevealStore is ReentrancyGuard {
     error PayFail();
     error RefundFail();
 
-    modifier productExists(uint256 productId) {
-        _productExists(productId);
+    modifier listingExists(uint256 listingId) {
+        _listingExists(listingId);
         _;
     }
 
@@ -106,25 +106,25 @@ contract ZkRevealStore is ReentrancyGuard {
         _;
     }
 
-    modifier itemExists(uint256 itemId) {
-        _itemExists(itemId);
+    modifier inventoryUnitExists(uint256 inventoryUnitId) {
+        _inventoryUnitExists(inventoryUnitId);
         _;
     }
 
-    function _productExists(uint256 productId) internal view {
-        if (products[productId].seller == address(0)) revert ProductNotFound();
+    function _listingExists(uint256 listingId) internal view {
+        if (listings[listingId].seller == address(0)) revert ListingNotFound();
     }
 
     function _escrowExists(uint256 escrowId) internal view {
         if (!escrows[escrowId].exists) revert EscrowNotFound();
     }
 
-    function _itemExists(uint256 itemId) internal view {
-        if (productItems[itemId].productId == 0) revert ItemNotFound();
+    function _inventoryUnitExists(uint256 inventoryUnitId) internal view {
+        if (inventoryUnits[inventoryUnitId].listingId == 0) revert InventoryUnitNotFound();
     }
 
-    function _onlyProductSeller(uint256 productId) internal view {
-        if (products[productId].seller != msg.sender) revert NotProductSeller();
+    function _onlyListingSeller(uint256 listingId) internal view {
+        if (listings[listingId].seller != msg.sender) revert NotListingSeller();
     }
 
     function _onlyEscrowSeller(uint256 escrowId) internal view {
@@ -135,106 +135,106 @@ contract ZkRevealStore is ReentrancyGuard {
         if (escrows[escrowId].buyer != msg.sender) revert NotEscrowBuyer();
     }
 
-    function createProduct(string calldata title, uint256 unitPrice, uint64 refundWindow)
+    function createListing(string calldata title, uint256 unitPrice, uint64 refundWindow)
         external
-        returns (uint256 productId)
+        returns (uint256 listingId)
     {
         if (bytes(title).length == 0) revert InvalidParams();
         if (unitPrice == 0) revert InvalidParams();
         if (refundWindow < MIN_REFUND_WINDOW || refundWindow > MAX_REFUND_WINDOW) revert InvalidParams();
 
-        productId = nextProductId++;
+        listingId = nextListingId++;
 
-        Product storage product = products[productId];
-        product.seller = msg.sender;
-        product.title = title;
-        product.unitPrice = unitPrice;
-        product.refundWindow = refundWindow;
-        product.active = true;
-        product.nextItemIndex = 0;
-        product.totalItems = 0;
-        product.soldItems = 0;
+        Listing storage listing = listings[listingId];
+        listing.seller = msg.sender;
+        listing.title = title;
+        listing.unitPrice = unitPrice;
+        listing.refundWindow = refundWindow;
+        listing.active = true;
+        listing.nextInventoryUnitIndex = 0;
+        listing.totalInventoryUnits = 0;
+        listing.soldInventoryUnits = 0;
 
-        productsBySeller[msg.sender].push(productId);
+        listingsBySeller[msg.sender].push(listingId);
 
-        emit ProductCreated(productId, msg.sender, title, unitPrice, refundWindow);
+        emit ListingCreated(listingId, msg.sender, title, unitPrice, refundWindow);
     }
 
-    function addItemsToProduct(uint256 productId, uint256 count) external productExists(productId) {
-        _onlyProductSeller(productId);
+    function addInventoryUnitsToListing(uint256 listingId, uint256 count) external listingExists(listingId) {
+        _onlyListingSeller(listingId);
         if (count == 0) revert InvalidParams();
 
-        Product storage product = products[productId];
+        Listing storage listing = listings[listingId];
 
         for (uint256 i = 0; i < count; i++) {
-            uint256 itemId = nextItemId++;
+            uint256 inventoryUnitId = nextInventoryUnitId++;
 
-            ProductItem storage productItem = productItems[itemId];
-            productItem.productId = productId;
-            productItem.consumed = false;
+            InventoryUnit storage inventoryUnit = inventoryUnits[inventoryUnitId];
+            inventoryUnit.listingId = listingId;
+            inventoryUnit.consumed = false;
 
-            productItemIds[productId].push(itemId);
-            product.totalItems += 1;
+            listingInventoryUnitIds[listingId].push(inventoryUnitId);
+            listing.totalInventoryUnits += 1;
         }
 
-        emit ProductItemsAdded(productId, count);
+        emit InventoryUnitAdded(listingId, count);
     }
 
-    function setProductActive(uint256 productId, bool active) external productExists(productId) {
-        _onlyProductSeller(productId);
-        products[productId].active = active;
-        emit ProductStatusChanged(productId, active);
+    function setListingActive(uint256 listingId, bool active) external listingExists(listingId) {
+        _onlyListingSeller(listingId);
+        listings[listingId].active = active;
+        emit ListingStatusChanged(listingId, active);
     }
 
-    function _allocateNextProductItem(uint256 productId) internal returns (uint256 itemId) {
-        Product storage product = products[productId];
+    function _allocateNextInventoryUnit(uint256 listingId) internal returns (uint256 inventoryUnitId) {
+        Listing storage listing = listings[listingId];
 
-        if (!product.active) revert ProductInactive();
+        if (!listing.active) revert ListingInactive();
 
-        uint256[] storage productItemIdList = productItemIds[productId];
-        if (product.nextItemIndex >= productItemIdList.length) revert SoldOut();
+        uint256[] storage inventoryUnitIdList = listingInventoryUnitIds[listingId];
+        if (listing.nextInventoryUnitIndex >= inventoryUnitIdList.length) revert SoldOut();
 
-        itemId = productItemIdList[product.nextItemIndex];
-        product.nextItemIndex += 1;
+        inventoryUnitId = inventoryUnitIdList[listing.nextInventoryUnitIndex];
+        listing.nextInventoryUnitIndex += 1;
 
-        ProductItem storage productItem = productItems[itemId];
-        if (productItem.productId != productId) revert BadState();
-        if (productItem.consumed) revert BadState();
+        InventoryUnit storage inventoryUnit = inventoryUnits[inventoryUnitId];
+        if (inventoryUnit.listingId != listingId) revert BadState();
+        if (inventoryUnit.consumed) revert BadState();
 
-        productItem.consumed = true;
-        product.soldItems += 1;
+        inventoryUnit.consumed = true;
+        listing.soldInventoryUnits += 1;
     }
 
-    function createEscrow(uint256 productId, bytes calldata buyerPubKey)
+    function createEscrow(uint256 listingId, bytes calldata buyerPubKey)
         external
         payable
-        productExists(productId)
+        listingExists(listingId)
         returns (uint256 escrowId)
     {
-        Product storage product = products[productId];
+        Listing storage listing = listings[listingId];
 
-        if (!product.active) revert ProductInactive();
+        if (!listing.active) revert ListingInactive();
         if (buyerPubKey.length == 0) revert InvalidParams();
-        if (msg.value != product.unitPrice) revert BadPrice();
+        if (msg.value != listing.unitPrice) revert BadPrice();
 
-        uint256 itemId = _allocateNextProductItem(productId);
+        uint256 inventoryUnitId = _allocateNextInventoryUnit(listingId);
 
         escrowId = nextEscrowId++;
 
         Escrow storage escrow = escrows[escrowId];
         escrow.exists = true;
-        escrow.productId = productId;
-        escrow.itemId = itemId;
-        escrow.seller = product.seller;
+        escrow.listingId = listingId;
+        escrow.inventoryUnitId = inventoryUnitId;
+        escrow.seller = listing.seller;
         escrow.buyer = msg.sender;
-        escrow.amount = product.unitPrice;
+        escrow.amount = listing.unitPrice;
         escrow.buyerPubKey = buyerPubKey;
         escrow.encryptedKey = "";
         escrow.createdAt = uint64(block.timestamp);
-        escrow.deadline = escrow.createdAt + product.refundWindow;
+        escrow.deadline = escrow.createdAt + listing.refundWindow;
         escrow.status = EscrowStatus.Pending;
 
-        emit EscrowCreated(escrowId, productId, itemId, product.seller, msg.sender, product.unitPrice);
+        emit EscrowCreated(escrowId, listingId, inventoryUnitId, listing.seller, msg.sender, listing.unitPrice);
     }
 
     /// @notice Seller posts a content CID and encrypted delivery payload, then receives escrowed funds.
@@ -253,11 +253,11 @@ contract ZkRevealStore is ReentrancyGuard {
         if (encryptedKey.length == 0) revert EmptyValue();
         if (block.timestamp > escrow.deadline) revert DeadlinePassed();
 
-        ProductItem storage productItem = productItems[escrow.itemId];
-        if (productItem.productId != escrow.productId) revert BadState();
-        if (bytes(productItem.contentCID).length != 0) revert BadState();
+        InventoryUnit storage inventoryUnit = inventoryUnits[escrow.inventoryUnitId];
+        if (inventoryUnit.listingId != escrow.listingId) revert BadState();
+        if (bytes(inventoryUnit.contentCID).length != 0) revert BadState();
 
-        productItem.contentCID = contentCID;
+        inventoryUnit.contentCID = contentCID;
         escrow.encryptedKey = encryptedKey;
         escrow.status = EscrowStatus.Delivered;
 
@@ -282,42 +282,57 @@ contract ZkRevealStore is ReentrancyGuard {
         emit EscrowReclaimed(escrowId);
     }
 
-    function getProductsBySeller(address seller) external view returns (uint256[] memory) {
-        return productsBySeller[seller];
+    function getListingsBySeller(address seller) external view returns (uint256[] memory) {
+        return listingsBySeller[seller];
     }
 
-    function getProductItemIds(uint256 productId) external view productExists(productId) returns (uint256[] memory) {
-        return productItemIds[productId];
-    }
-
-    function getProductRemainingItems(uint256 productId) public view productExists(productId) returns (uint256) {
-        Product storage product = products[productId];
-        return product.totalItems - product.soldItems;
-    }
-
-    function isProductSoldOut(uint256 productId) public view productExists(productId) returns (bool) {
-        return getProductRemainingItems(productId) == 0;
-    }
-
-    function getProductInventorySummary(uint256 productId)
+    function getListingInventoryUnitIds(uint256 listingId)
         external
         view
-        productExists(productId)
-        returns (uint256 totalItems, uint256 soldItems, uint256 remainingItems, bool soldOut)
+        listingExists(listingId)
+        returns (uint256[] memory)
     {
-        Product storage product = products[productId];
-        totalItems = product.totalItems;
-        soldItems = product.soldItems;
-        remainingItems = product.totalItems - product.soldItems;
-        soldOut = remainingItems == 0;
+        return listingInventoryUnitIds[listingId];
     }
 
-    function getProduct(uint256 productId) external view productExists(productId) returns (Product memory) {
-        return products[productId];
+    function getListingRemainingInventoryUnits(uint256 listingId)
+        public
+        view
+        listingExists(listingId)
+        returns (uint256)
+    {
+        Listing storage listing = listings[listingId];
+        return listing.totalInventoryUnits - listing.soldInventoryUnits;
     }
 
-    function getProductItem(uint256 itemId) external view itemExists(itemId) returns (ProductItem memory) {
-        return productItems[itemId];
+    function isListingSoldOut(uint256 listingId) public view listingExists(listingId) returns (bool) {
+        return getListingRemainingInventoryUnits(listingId) == 0;
+    }
+
+    function getListingInventorySummary(uint256 listingId)
+        external
+        view
+        listingExists(listingId)
+        returns (uint256 totalInventoryUnits, uint256 soldInventoryUnits, uint256 remainingInventoryUnits, bool soldOut)
+    {
+        Listing storage listing = listings[listingId];
+        totalInventoryUnits = listing.totalInventoryUnits;
+        soldInventoryUnits = listing.soldInventoryUnits;
+        remainingInventoryUnits = listing.totalInventoryUnits - listing.soldInventoryUnits;
+        soldOut = remainingInventoryUnits == 0;
+    }
+
+    function getListing(uint256 listingId) external view listingExists(listingId) returns (Listing memory) {
+        return listings[listingId];
+    }
+
+    function getInventoryUnit(uint256 inventoryUnitId)
+        external
+        view
+        inventoryUnitExists(inventoryUnitId)
+        returns (InventoryUnit memory)
+    {
+        return inventoryUnits[inventoryUnitId];
     }
 
     function getEscrow(uint256 escrowId) external view escrowExists(escrowId) returns (Escrow memory) {

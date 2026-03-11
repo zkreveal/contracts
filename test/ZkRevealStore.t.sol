@@ -26,191 +26,191 @@ contract ZkRevealStoreTest is Test {
         vm.deal(attacker, 10 ether);
     }
 
-    function _createProductAsSeller() internal returns (uint256 productId) {
+    function _createListingAsSeller() internal returns (uint256 listingId) {
         vm.prank(seller);
-        productId = store.createProduct(title, unitPrice, refundWindow);
+        listingId = store.createListing(title, unitPrice, refundWindow);
     }
 
-    function _addItemsAsSeller(uint256 productId, uint256 count) internal {
+    function _addInventoryUnitsAsSeller(uint256 listingId, uint256 count) internal {
         vm.prank(seller);
-        store.addItemsToProduct(productId, count);
+        store.addInventoryUnitsToListing(listingId, count);
     }
 
-    function _createEscrowAs(uint256 productId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
+    function _createEscrowAs(uint256 listingId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
         vm.prank(who);
-        escrowId = store.createEscrow{value: unitPrice}(productId, pubKey);
+        escrowId = store.createEscrow{value: unitPrice}(listingId, pubKey);
     }
 
     function _assertInventory(
-        uint256 productId,
+        uint256 listingId,
         uint256 expectedTotal,
         uint256 expectedSold,
         uint256 expectedRemaining,
         bool expectedSoldOut
     ) internal view {
-        (uint256 totalItems, uint256 soldItems, uint256 remainingItems, bool soldOut) =
-            store.getProductInventorySummary(productId);
-        assertEq(totalItems, expectedTotal);
-        assertEq(soldItems, expectedSold);
-        assertEq(remainingItems, expectedRemaining);
+        (uint256 totalInventoryUnits, uint256 soldInventoryUnits, uint256 remainingInventoryUnits, bool soldOut) =
+            store.getListingInventorySummary(listingId);
+        assertEq(totalInventoryUnits, expectedTotal);
+        assertEq(soldInventoryUnits, expectedSold);
+        assertEq(remainingInventoryUnits, expectedRemaining);
         assertEq(soldOut, expectedSoldOut);
     }
 
-    function test_ProductCreated_Emits() public {
+    function test_ListingCreated_Emits() public {
         vm.expectEmit(true, true, true, true);
-        emit ZkRevealStore.ProductCreated(1, seller, title, unitPrice, refundWindow);
+        emit ZkRevealStore.ListingCreated(1, seller, title, unitPrice, refundWindow);
 
         vm.prank(seller);
-        store.createProduct(title, unitPrice, refundWindow);
+        store.createListing(title, unitPrice, refundWindow);
     }
 
-    function test_CreateProduct_SetsFields() public {
-        uint256 productId = _createProductAsSeller();
+    function test_CreateListing_SetsFields() public {
+        uint256 listingId = _createListingAsSeller();
 
-        ZkRevealStore.Product memory product = store.getProduct(productId);
-        assertEq(product.seller, seller);
-        assertEq(product.title, title);
-        assertEq(product.unitPrice, unitPrice);
-        assertEq(product.refundWindow, refundWindow);
-        assertEq(product.active, true);
-        assertEq(product.nextItemIndex, 0);
-        assertEq(product.totalItems, 0);
-        assertEq(product.soldItems, 0);
+        ZkRevealStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.seller, seller);
+        assertEq(listing.title, title);
+        assertEq(listing.unitPrice, unitPrice);
+        assertEq(listing.refundWindow, refundWindow);
+        assertEq(listing.active, true);
+        assertEq(listing.nextInventoryUnitIndex, 0);
+        assertEq(listing.totalInventoryUnits, 0);
+        assertEq(listing.soldInventoryUnits, 0);
 
-        uint256[] memory ids = store.getProductsBySeller(seller);
+        uint256[] memory ids = store.getListingsBySeller(seller);
         assertEq(ids.length, 1);
-        assertEq(ids[0], productId);
+        assertEq(ids[0], listingId);
     }
 
-    function test_CreateProduct_TracksMultipleProductsBySeller() public {
-        uint256 productId1 = _createProductAsSeller();
-        uint256 productId2 = _createProductAsSeller();
+    function test_CreateListing_TracksMultipleListingsBySeller() public {
+        uint256 listingId1 = _createListingAsSeller();
+        uint256 listingId2 = _createListingAsSeller();
 
-        uint256[] memory ids = store.getProductsBySeller(seller);
+        uint256[] memory ids = store.getListingsBySeller(seller);
         assertEq(ids.length, 2);
-        assertEq(ids[0], productId1);
-        assertEq(ids[1], productId2);
+        assertEq(ids[0], listingId1);
+        assertEq(ids[1], listingId2);
     }
 
-    function test_CreateProductInvalidParams_Reverts() public {
+    function test_CreateListingInvalidParams_Reverts() public {
         uint64 tooShort = store.MIN_REFUND_WINDOW() - 1;
         uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createProduct("", unitPrice, refundWindow);
+        store.createListing("", unitPrice, refundWindow);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createProduct(title, 0, refundWindow);
+        store.createListing(title, 0, refundWindow);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createProduct(title, unitPrice, tooShort);
+        store.createListing(title, unitPrice, tooShort);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createProduct(title, unitPrice, tooLong);
+        store.createListing(title, unitPrice, tooLong);
     }
 
-    function test_AddItems_AppendsInventory() public {
-        uint256 productId = _createProductAsSeller();
+    function test_AddInventoryUnitsToListing_AppendsInventory() public {
+        uint256 listingId = _createListingAsSeller();
 
         vm.expectEmit(true, false, false, true);
-        emit ZkRevealStore.ProductItemsAdded(productId, 3);
+        emit ZkRevealStore.InventoryUnitAdded(listingId, 3);
 
-        _addItemsAsSeller(productId, 3);
+        _addInventoryUnitsAsSeller(listingId, 3);
 
-        uint256[] memory itemIds = store.getProductItemIds(productId);
-        assertEq(itemIds.length, 3);
+        uint256[] memory inventoryUnitIds = store.getListingInventoryUnitIds(listingId);
+        assertEq(inventoryUnitIds.length, 3);
 
-        ZkRevealStore.Product memory product = store.getProduct(productId);
-        assertEq(product.totalItems, 3);
-        assertEq(product.soldItems, 0);
+        ZkRevealStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.totalInventoryUnits, 3);
+        assertEq(listing.soldInventoryUnits, 0);
 
-        ZkRevealStore.ProductItem memory i0 = store.getProductItem(itemIds[0]);
-        ZkRevealStore.ProductItem memory i1 = store.getProductItem(itemIds[1]);
-        ZkRevealStore.ProductItem memory i2 = store.getProductItem(itemIds[2]);
+        ZkRevealStore.InventoryUnit memory inventoryUnit0 = store.getInventoryUnit(inventoryUnitIds[0]);
+        ZkRevealStore.InventoryUnit memory inventoryUnit1 = store.getInventoryUnit(inventoryUnitIds[1]);
+        ZkRevealStore.InventoryUnit memory inventoryUnit2 = store.getInventoryUnit(inventoryUnitIds[2]);
 
-        assertEq(i0.productId, productId);
-        assertEq(i0.contentCID, "");
-        assertEq(i0.consumed, false);
+        assertEq(inventoryUnit0.listingId, listingId);
+        assertEq(inventoryUnit0.contentCID, "");
+        assertEq(inventoryUnit0.consumed, false);
 
-        assertEq(i1.productId, productId);
-        assertEq(i1.contentCID, "");
-        assertEq(i1.consumed, false);
+        assertEq(inventoryUnit1.listingId, listingId);
+        assertEq(inventoryUnit1.contentCID, "");
+        assertEq(inventoryUnit1.consumed, false);
 
-        assertEq(i2.productId, productId);
-        assertEq(i2.contentCID, "");
-        assertEq(i2.consumed, false);
+        assertEq(inventoryUnit2.listingId, listingId);
+        assertEq(inventoryUnit2.contentCID, "");
+        assertEq(inventoryUnit2.consumed, false);
     }
 
-    function test_AddItems_ZeroCountReverts() public {
-        uint256 productId = _createProductAsSeller();
+    function test_AddInventoryUnitsToListing_ZeroCountReverts() public {
+        uint256 listingId = _createListingAsSeller();
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.addItemsToProduct(productId, 0);
+        store.addInventoryUnitsToListing(listingId, 0);
     }
 
-    function test_AddItems_NonexistentProductReverts() public {
+    function test_AddInventoryUnitsToListing_NonexistentListingReverts() public {
         vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.ProductNotFound.selector);
-        store.addItemsToProduct(999, 1);
+        vm.expectRevert(ZkRevealStore.ListingNotFound.selector);
+        store.addInventoryUnitsToListing(999, 1);
     }
 
-    function test_Permissions_NonSellerCannotAddItems() public {
-        uint256 productId = _createProductAsSeller();
+    function test_Permissions_NonSellerCannotAddInventoryUnits() public {
+        uint256 listingId = _createListingAsSeller();
 
         vm.prank(attacker);
-        vm.expectRevert(ZkRevealStore.NotProductSeller.selector);
-        store.addItemsToProduct(productId, 1);
+        vm.expectRevert(ZkRevealStore.NotListingSeller.selector);
+        store.addInventoryUnitsToListing(listingId, 1);
     }
 
-    function test_SetProductActive_TogglesAndBlocksEscrowCreation() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+    function test_SetListingActive_TogglesAndBlocksEscrowCreation() public {
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.expectEmit(true, false, false, true);
-        emit ZkRevealStore.ProductStatusChanged(productId, false);
+        emit ZkRevealStore.ListingStatusChanged(listingId, false);
 
         vm.prank(seller);
-        store.setProductActive(productId, false);
+        store.setListingActive(listingId, false);
 
         vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.ProductInactive.selector);
-        store.createEscrow{value: unitPrice}(productId, buyerPubKey);
+        vm.expectRevert(ZkRevealStore.ListingInactive.selector);
+        store.createEscrow{value: unitPrice}(listingId, buyerPubKey);
 
         vm.prank(seller);
-        store.setProductActive(productId, true);
+        store.setListingActive(listingId, true);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
     }
 
-    function test_Permissions_NonSellerCannotToggleProductStatus() public {
-        uint256 productId = _createProductAsSeller();
+    function test_Permissions_NonSellerCannotToggleListingStatus() public {
+        uint256 listingId = _createListingAsSeller();
 
         vm.prank(attacker);
-        vm.expectRevert(ZkRevealStore.NotProductSeller.selector);
-        store.setProductActive(productId, false);
+        vm.expectRevert(ZkRevealStore.NotListingSeller.selector);
+        store.setListingActive(listingId, false);
     }
 
     function test_CreateEscrow_AllocatesAndCreatesEscrow() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 2);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 2);
 
         uint256 buyerBalBefore = buyer.balance;
 
         vm.expectEmit(true, true, true, true);
-        emit ZkRevealStore.EscrowCreated(1, productId, 1, seller, buyer, unitPrice);
+        emit ZkRevealStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
 
         ZkRevealStore.Escrow memory escrow = store.getEscrow(escrowId);
-        assertEq(escrow.productId, productId);
-        assertEq(escrow.itemId, 1);
+        assertEq(escrow.listingId, listingId);
+        assertEq(escrow.inventoryUnitId, 1);
         assertEq(escrow.seller, seller);
         assertEq(escrow.buyer, buyer);
         assertEq(escrow.amount, unitPrice);
@@ -218,75 +218,75 @@ contract ZkRevealStoreTest is Test {
         assertEq(uint8(escrow.status), uint8(ZkRevealStore.EscrowStatus.Pending));
         assertEq(escrow.deadline, escrow.createdAt + refundWindow);
 
-        ZkRevealStore.ProductItem memory productItem = store.getProductItem(1);
-        assertEq(productItem.contentCID, "");
-        assertEq(productItem.consumed, true);
+        ZkRevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(1);
+        assertEq(inventoryUnit.contentCID, "");
+        assertEq(inventoryUnit.consumed, true);
 
         assertEq(buyer.balance, buyerBalBefore - unitPrice);
         assertEq(address(store).balance, unitPrice);
 
-        ZkRevealStore.Product memory product = store.getProduct(productId);
-        assertEq(product.soldItems, 1);
-        assertEq(product.nextItemIndex, 1);
-        assertEq(store.getProductRemainingItems(productId), 1);
+        ZkRevealStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.soldInventoryUnits, 1);
+        assertEq(listing.nextInventoryUnitIndex, 1);
+        assertEq(store.getListingRemainingInventoryUnits(listingId), 1);
     }
 
     function test_CreateEscrow_SequentialAllocation() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 3);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 3);
 
-        uint256 escrowId1 = _createEscrowAs(productId, buyer, buyerPubKey);
-        uint256 escrowId2 = _createEscrowAs(productId, buyer2, buyer2PubKey);
+        uint256 escrowId1 = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId2 = _createEscrowAs(listingId, buyer2, buyer2PubKey);
 
-        assertEq(store.getEscrow(escrowId1).itemId, 1);
-        assertEq(store.getEscrow(escrowId2).itemId, 2);
+        assertEq(store.getEscrow(escrowId1).inventoryUnitId, 1);
+        assertEq(store.getEscrow(escrowId2).inventoryUnitId, 2);
 
-        ZkRevealStore.Product memory product = store.getProduct(productId);
-        assertEq(product.soldItems, 2);
-        assertEq(product.nextItemIndex, 2);
-        assertEq(store.getProductRemainingItems(productId), 1);
+        ZkRevealStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.soldInventoryUnits, 2);
+        assertEq(listing.nextInventoryUnitIndex, 2);
+        assertEq(store.getListingRemainingInventoryUnits(listingId), 1);
     }
 
     function test_CreateEscrow_SoldOutReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        _createEscrowAs(productId, buyer, buyerPubKey);
+        _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(buyer2);
         vm.expectRevert(ZkRevealStore.SoldOut.selector);
-        store.createEscrow{value: unitPrice}(productId, buyer2PubKey);
+        store.createEscrow{value: unitPrice}(listingId, buyer2PubKey);
     }
 
     function test_CreateEscrow_BadPriceReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.BadPrice.selector);
-        store.createEscrow{value: unitPrice - 1}(productId, buyerPubKey);
+        store.createEscrow{value: unitPrice - 1}(listingId, buyerPubKey);
     }
 
     function test_CreateEscrow_EmptyPubKeyReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createEscrow{value: unitPrice}(productId, "");
+        store.createEscrow{value: unitPrice}(listingId, "");
     }
 
-    function test_CreateEscrow_NonexistentProductReverts() public {
+    function test_CreateEscrow_NonexistentListingReverts() public {
         vm.prank(buyer);
-        vm.expectRevert(ZkRevealStore.ProductNotFound.selector);
+        vm.expectRevert(ZkRevealStore.ListingNotFound.selector);
         store.createEscrow{value: unitPrice}(999, buyerPubKey);
     }
 
     function test_Permissions_NonSellerCannotDeliverEscrow() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(attacker);
         vm.expectRevert(ZkRevealStore.NotEscrowSeller.selector);
@@ -294,10 +294,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_DeliverEscrow_EmptyEncryptedKeyReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.EmptyValue.selector);
@@ -305,10 +305,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_DeliverEscrow_EmptyContentCIDReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.EmptyValue.selector);
@@ -316,10 +316,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_DeliverEscrow_HappyPathPaysSeller() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         uint256 sellerBalBefore = seller.balance;
 
         vm.expectEmit(true, false, false, true);
@@ -332,18 +332,18 @@ contract ZkRevealStoreTest is Test {
         assertEq(uint8(escrow.status), uint8(ZkRevealStore.EscrowStatus.Delivered));
         assertEq(escrow.encryptedKey, hex"deadbeef");
 
-        ZkRevealStore.ProductItem memory productItem = store.getProductItem(escrow.itemId);
-        assertEq(productItem.contentCID, "ipfs://cid-1");
+        ZkRevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
+        assertEq(inventoryUnit.contentCID, "ipfs://cid-1");
 
         assertEq(seller.balance, sellerBalBefore + unitPrice);
         assertEq(address(store).balance, 0);
     }
 
     function test_DeliverEscrow_AtDeadlineSucceeds() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
 
         vm.warp(uint256(deadline));
@@ -352,14 +352,14 @@ contract ZkRevealStoreTest is Test {
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
         assertEq(uint8(store.getEscrow(escrowId).status), uint8(ZkRevealStore.EscrowStatus.Delivered));
-        assertEq(store.getProductItem(store.getEscrow(escrowId).itemId).contentCID, "ipfs://cid-1");
+        assertEq(store.getInventoryUnit(store.getEscrow(escrowId).inventoryUnitId).contentCID, "ipfs://cid-1");
     }
 
     function test_DeliverEscrow_CannotDeliverTwice() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
@@ -370,10 +370,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_DeliverEscrow_AfterDeadlineReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
@@ -384,21 +384,21 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_Getters_NonexistentIdsRevert() public {
-        vm.expectRevert(ZkRevealStore.ProductNotFound.selector);
-        store.getProduct(999);
+        vm.expectRevert(ZkRevealStore.ListingNotFound.selector);
+        store.getListing(999);
 
-        vm.expectRevert(ZkRevealStore.ItemNotFound.selector);
-        store.getProductItem(999);
+        vm.expectRevert(ZkRevealStore.InventoryUnitNotFound.selector);
+        store.getInventoryUnit(999);
 
         vm.expectRevert(ZkRevealStore.EscrowNotFound.selector);
         store.getEscrow(999);
     }
 
     function test_Permissions_NonBuyerCannotReclaim() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
@@ -408,11 +408,11 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ReclaimEscrow_AfterDeadlineRefundsBuyer() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
         uint256 buyerBalBefore = buyer.balance;
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
@@ -428,17 +428,17 @@ contract ZkRevealStoreTest is Test {
         assertEq(buyer.balance, buyerBalBefore);
 
         // Consumed inventory stays consumed (no recycle)
-        ZkRevealStore.ProductItem memory productItem = store.getProductItem(escrow.itemId);
-        assertEq(productItem.contentCID, "");
-        assertEq(productItem.consumed, true);
-        assertEq(store.getProductRemainingItems(productId), 0);
+        ZkRevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
+        assertEq(inventoryUnit.contentCID, "");
+        assertEq(inventoryUnit.consumed, true);
+        assertEq(store.getListingRemainingInventoryUnits(listingId), 0);
     }
 
     function test_ReclaimEscrow_BeforeDeadlineReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.DeadlineNotPassed.selector);
@@ -446,10 +446,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ReclaimEscrow_CannotReclaimTwice() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
@@ -463,10 +463,10 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ReclaimEscrow_AfterDeliveryReverts() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 1);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
@@ -479,18 +479,18 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ViewHelpers_InventorySummary() public {
-        uint256 productId = _createProductAsSeller();
-        _addItemsAsSeller(productId, 2);
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 2);
 
-        _assertInventory(productId, 2, 0, 2, false);
+        _assertInventory(listingId, 2, 0, 2, false);
 
-        _createEscrowAs(productId, buyer, buyerPubKey);
+        _createEscrowAs(listingId, buyer, buyerPubKey);
 
-        _assertInventory(productId, 2, 1, 1, false);
+        _assertInventory(listingId, 2, 1, 1, false);
 
-        _createEscrowAs(productId, buyer2, buyer2PubKey);
+        _createEscrowAs(listingId, buyer2, buyer2PubKey);
 
-        _assertInventory(productId, 2, 2, 0, true);
-        assertEq(store.isProductSoldOut(productId), true);
+        _assertInventory(listingId, 2, 2, 0, true);
+        assertEq(store.isListingSoldOut(listingId), true);
     }
 }

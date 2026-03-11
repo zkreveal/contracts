@@ -6,9 +6,9 @@ Inventory-based encrypted delivery escrow in Solidity (Foundry project).
 
 zkReveal uses a hierarchical model:
 
-- `Product`: reusable listing with shared metadata and per-unit price.
-- `ProductItem`: one inventory unit under a product; `contentCID` is assigned only when the seller delivers an escrow.
-- `Escrow`: one buyer purchase tied to exactly one allocated product item.
+- `Listing`: reusable sale entry with shared metadata and per-unit price.
+- `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
+- `Escrow`: one buyer purchase tied to exactly one allocated inventory unit.
 
 Seller identity is the seller wallet address.
 
@@ -25,10 +25,10 @@ This contract is a trusted-seller delivery escrow, not a trustless proof system.
 
 The following data is public on-chain or retrievable from contract state:
 
-- delivered `ProductItem.contentCID`
+- delivered `InventoryUnit.contentCID`
 - `Escrow.buyerPubKey`
 - `Escrow.encryptedKey`
-- escrow timestamps, status, seller, buyer, product id, and item id
+- escrow timestamps, status, seller, buyer, listing id, and inventory unit id
 
 The following data is not stored on-chain:
 
@@ -42,11 +42,11 @@ The following data is not stored on-chain:
 
 Key storage:
 
-- `products[productId]`
-- `productItems[itemId]`
+- `listings[listingId]`
+- `inventoryUnits[inventoryUnitId]`
 - `escrows[escrowId]`
-- `productsBySeller[seller]`
-- `productItemIds[productId]`
+- `listingsBySeller[seller]`
+- `listingInventoryUnitIds[listingId]`
 
 Escrow status:
 
@@ -58,8 +58,8 @@ Escrow status:
 
 ### Seller flow
 
-1. Create product via `createProduct(title, unitPrice, refundWindow)`.
-2. Add inventory units via `addItemsToProduct(productId, count)`.
+1. Create listing via `createListing(title, unitPrice, refundWindow)`.
+2. Add inventory units via `addInventoryUnitsToListing(listingId, count)`.
 3. Buyer creates escrow via `createEscrow`.
 4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
 5. Contract pays seller immediately on successful delivery submission.
@@ -67,15 +67,15 @@ Escrow status:
 ### Buyer flow
 
 1. Generate buyer encryption keypair off-chain.
-2. Call `createEscrow(productId, buyerPubKey)` and pay exact `unitPrice`.
+2. Call `createEscrow(listingId, buyerPubKey)` and pay exact `unitPrice`.
 3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
-4. Read the delivered `contentCID` from the allocated item via `getProductItem(escrow.itemId)`.
+4. Read the delivered `contentCID` from the allocated inventory unit via `getInventoryUnit(escrow.inventoryUnitId)`.
 5. Decrypt content key off-chain and use the delivered `contentCID`.
 6. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
 
 ## Function Interface and Data Use
 
-### `createProduct(string title, uint256 unitPrice, uint64 refundWindow)`
+### `createListing(string title, uint256 unitPrice, uint64 refundWindow)`
 
 Inputs:
 
@@ -89,60 +89,60 @@ Uses:
 
 Writes:
 
-- new `Product`
-- `productsBySeller[msg.sender]`
+- new `Listing`
+- `listingsBySeller[msg.sender]`
 
-### `addItemsToProduct(uint256 productId, uint256 count)`
+### `addInventoryUnitsToListing(uint256 listingId, uint256 count)`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `count`: number of inventory units to add
 
 Uses:
 
-- caller must be product seller
+- caller must be listing seller
 - count must be greater than zero
 
 Writes:
 
-- appends empty `ProductItem` rows
-- appends to `productItemIds[productId]`
-- increments product `totalItems`
+- appends empty `InventoryUnit` rows
+- appends to `listingInventoryUnitIds[listingId]`
+- increments listing `totalInventoryUnits`
 
-### `setProductActive(uint256 productId, bool active)`
+### `setListingActive(uint256 listingId, bool active)`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `active`
 
 Uses:
 
-- caller must be product seller
+- caller must be listing seller
 
 Writes:
 
-- product availability flag
+- listing availability flag
 
-### `createEscrow(uint256 productId, bytes buyerPubKey) payable`
+### `createEscrow(uint256 listingId, bytes buyerPubKey) payable`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `buyerPubKey`
 - `msg.value`
 
 Uses:
 
-- product must be active with available inventory
-- `msg.value` must equal product `unitPrice`
-- internally calls `_allocateNextProductItem(productId)` (sequential allocation)
+- listing must be active with available inventory
+- `msg.value` must equal listing `unitPrice`
+- internally calls `_allocateNextInventoryUnit(listingId)` (sequential allocation)
 
 Writes:
 
-- marks one `ProductItem` as `consumed`
-- creates `Escrow` with product/item linkage, buyer/seller, amount, key, timestamps, deadline, status
+- marks one `InventoryUnit` as `consumed`
+- creates `Escrow` with listing/inventory-unit linkage, buyer/seller, amount, key, timestamps, deadline, status
 
 ### `deliverEscrow(uint256 escrowId, string contentCID, bytes encryptedKey)`
 
@@ -161,7 +161,7 @@ Uses:
 
 Writes:
 
-- stores `contentCID` on the allocated `ProductItem`
+- stores `contentCID` on the allocated `InventoryUnit`
 - stores `encryptedKey`
 - sets escrow status to `Delivered`
 - transfers escrow amount to seller
@@ -190,9 +190,9 @@ Writes:
 
 ## Events
 
-- `ProductCreated`
-- `ProductItemsAdded`
-- `ProductStatusChanged`
+- `ListingCreated`
+- `InventoryUnitAdded`
+- `ListingStatusChanged`
 - `EscrowCreated`
 - `EscrowDelivered`
 - `EscrowReclaimed`

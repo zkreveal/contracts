@@ -5,29 +5,29 @@ This file freezes the current v0 architecture and naming for `ZkRevealStore`.
 ## Locked Model
 
 - Seller identity is `address`.
-- `Product` is the reusable listing and price source.
-- `ProductItem` is one inventory unit under a product, with `contentCID` assigned at delivery time.
-- `Escrow` is one purchase lifecycle tied to exactly one allocated product item.
+- `Listing` is the reusable sale entry and price source.
+- `InventoryUnit` is one inventory unit under a listing, with `contentCID` assigned at delivery time.
+- `Escrow` is one purchase lifecycle tied to exactly one allocated inventory unit.
 
 Core storage relations:
 
-- `products[productId]`
-- `productItems[itemId]`
+- `listings[listingId]`
+- `inventoryUnits[inventoryUnitId]`
 - `escrows[escrowId]`
-- `productsBySeller[seller]`
-- `productItemIds[productId]`
+- `listingsBySeller[seller]`
+- `listingInventoryUnitIds[listingId]`
 
 ID counters:
 
-- `nextProductId`
-- `nextItemId`
+- `nextListingId`
+- `nextInventoryUnitId`
 - `nextEscrowId`
 
 ## Locked Invariants
 
-1. Buyer purchases a product, never picks an item id directly.
-2. Item allocation is sequential via `product.nextItemIndex`.
-3. Once allocated, a `ProductItem` is permanently `consumed = true` (no recycling on reclaim).
+1. Buyer purchases a listing, never picks an inventory unit id directly.
+2. Inventory allocation is sequential via `listing.nextInventoryUnitIndex`.
+3. Once allocated, an `InventoryUnit` is permanently `consumed = true` (no recycling on reclaim).
 4. Escrow lifecycle is single path: `Pending -> Delivered` or `Pending -> Reclaimed`.
 5. Funds only leave contract through `deliverEscrow` (to seller) or `reclaimEscrow` (to buyer).
 6. Window bounds are enforced globally:
@@ -38,18 +38,18 @@ ID counters:
    - payload correctness and buyer-side decryptability are off-chain concerns
 8. Escrow contents are not private on-chain:
    - `buyerPubKey` and `encryptedKey` are stored in escrow state
-   - delivered `contentCID` is stored on each fulfilled `ProductItem`
+   - delivered `contentCID` is stored on each fulfilled `InventoryUnit`
 
-## Product Semantics
+## Listing Semantics
 
-`Product.unitPrice` is per-item price.  
-`Product.totalItems` counts all items ever added.  
-`Product.soldItems` counts all allocated/consumed items.  
-`Product.active` gates new escrow creation only.
+`Listing.unitPrice` is per-unit price.  
+`Listing.totalInventoryUnits` counts all units ever added.  
+`Listing.soldInventoryUnits` counts all allocated/consumed units.  
+`Listing.active` gates new escrow creation only.
 
 ## Function Contract (Inputs and State Usage)
 
-### `createProduct(title, unitPrice, refundWindow) -> productId`
+### `createListing(title, unitPrice, refundWindow) -> listingId`
 
 Inputs:
 
@@ -65,81 +65,81 @@ Validation:
 
 Writes:
 
-- creates `products[productId]`
-- appends `productId` to `productsBySeller[msg.sender]`
+- creates `listings[listingId]`
+- appends `listingId` to `listingsBySeller[msg.sender]`
 
 Emits:
 
-- `ProductCreated`
+- `ListingCreated`
 
-### `addItemsToProduct(productId, count)`
+### `addInventoryUnitsToListing(listingId, count)`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `count`
 
 Validation:
 
-- product exists
-- caller is product seller
+- listing exists
+- caller is listing seller
 - count > 0
 
 Writes:
 
-- creates new `productItems[itemId]` entries
-- each new item starts with empty `contentCID`
-- appends each `itemId` to `productItemIds[productId]`
-- increments `products[productId].totalItems`
+- creates new `inventoryUnits[inventoryUnitId]` entries
+- each new unit starts with empty `contentCID`
+- appends each `inventoryUnitId` to `listingInventoryUnitIds[listingId]`
+- increments `listings[listingId].totalInventoryUnits`
 
 Emits:
 
-- `ProductItemsAdded`
+- `InventoryUnitAdded`
 
-### `setProductActive(productId, active)`
+### `setListingActive(listingId, active)`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `active`
 
 Validation:
 
-- product exists
-- caller is product seller
+- listing exists
+- caller is listing seller
 
 Writes:
 
-- `products[productId].active`
+- `listings[listingId].active`
 
 Emits:
 
-- `ProductStatusChanged`
+- `ListingStatusChanged`
 
-### `createEscrow(productId, buyerPubKey) payable -> escrowId`
+### `createEscrow(listingId, buyerPubKey) payable -> escrowId`
 
 Inputs:
 
-- `productId`
+- `listingId`
 - `buyerPubKey`
 - `msg.value`
 
 Validation:
 
-- product exists
-- product active
+- listing exists
+- listing active
 - buyerPubKey non-empty
-- `msg.value == products[productId].unitPrice`
-- inventory available through `_allocateNextProductItem`
+- `msg.value == listings[listingId].unitPrice`
+- inventory available through `_allocateNextInventoryUnit`
 
 Writes:
 
-- allocates item id sequentially
-- marks allocated `productItems[itemId].consumed = true`
-- increments `products[productId].nextItemIndex`
-- increments `products[productId].soldItems`
+- allocates inventory unit id sequentially
+- marks allocated `inventoryUnits[inventoryUnitId].consumed = true`
+- increments `listings[listingId].nextInventoryUnitIndex`
+- increments `listings[listingId].soldInventoryUnits`
 - creates `escrows[escrowId]` with:
-  - `productId`, `itemId`, `seller`, `buyer`, `amount`
+  - `listingId`, `inventoryUnitId`, `seller`, `buyer`, `amount`
   - `buyerPubKey`, `encryptedKey = ""`
   - `createdAt`, `deadline`, `status = Pending`
 
@@ -166,7 +166,7 @@ Validation:
 
 Writes:
 
-- stores `productItems[escrow.itemId].contentCID`
+- stores `inventoryUnits[escrow.inventoryUnitId].contentCID`
 - stores `escrow.encryptedKey`
 - sets `escrow.status = Delivered`
 
@@ -209,9 +209,9 @@ Emits:
 
 ## Locked Events
 
-- `ProductCreated(uint256,address,string,uint256,uint64)`
-- `ProductItemsAdded(uint256,uint256)`
-- `ProductStatusChanged(uint256,bool)`
+- `ListingCreated(uint256,address,string,uint256,uint64)`
+- `InventoryUnitAdded(uint256,uint256)`
+- `ListingStatusChanged(uint256,bool)`
 - `EscrowCreated(uint256,uint256,uint256,address,address,uint256)`
 - `EscrowDelivered(uint256)`
 - `EscrowReclaimed(uint256)`
