@@ -202,9 +202,9 @@ Writes:
 ### Sonic Testnet
 
 - Chain ID: `14601`
-- ZkRevealStore: `0x7f5c1f1D8F0EB3c4eE0fBad239936D2B0BA093f1`
-- Tx: `0x8662f52b5b56e020597db48c1930ec243fad46e22708f49d00764c0f1337c36c`
-- Block: `12692107`
+- ZkRevealStore: `0x5696622bEBEbA3005E2DbfED88154bE5d0F17C49`
+- Tx: `0x6e9210377c69c77ac48390fff6aa08d14c38b272951a7ec77f747c903235ef11`
+- Block: `12756899`
 - Compiler: `0.8.24`
 - EVM Version: `paris`
 
