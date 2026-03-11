@@ -7,7 +7,7 @@ Inventory-based encrypted delivery escrow in Solidity (Foundry project).
 zkReveal uses a hierarchical model:
 
 - `Product`: reusable listing with shared metadata and per-unit price.
-- `ProductItem`: one inventory unit under a product, each with its own `contentCID`.
+- `ProductItem`: one inventory unit under a product; `contentCID` is assigned only when the seller delivers an escrow.
 - `Escrow`: one buyer purchase tied to exactly one allocated product item.
 
 Seller identity is the seller wallet address.
@@ -16,8 +16,8 @@ Seller identity is the seller wallet address.
 
 This contract is a trusted-seller delivery escrow, not a trustless proof system.
 
-- `deliverEscrow` only verifies that `encryptedKey` is non-empty and submitted on or before the escrow deadline.
-- The contract does not prove that the payload decrypts correctly or matches the allocated item.
+- `deliverEscrow` only verifies that `contentCID` and `encryptedKey` are non-empty and submitted on or before the escrow deadline.
+- The contract does not prove that the CID or encrypted payload are correct for the allocated item.
 - Seller is paid immediately after successful delivery submission.
 - Correctness of the delivered payload is verified off-chain by the buyer.
 
@@ -25,7 +25,7 @@ This contract is a trusted-seller delivery escrow, not a trustless proof system.
 
 The following data is public on-chain or retrievable from contract state:
 
-- `ProductItem.contentCID`
+- delivered `ProductItem.contentCID`
 - `Escrow.buyerPubKey`
 - `Escrow.encryptedKey`
 - escrow timestamps, status, seller, buyer, product id, and item id
@@ -59,9 +59,9 @@ Escrow status:
 ### Seller flow
 
 1. Create product via `createProduct(title, unitPrice, refundWindow)`.
-2. Add inventory CIDs via `addItemsToProduct(productId, contentCIDs)`.
+2. Add inventory units via `addItemsToProduct(productId, count)`.
 3. Buyer creates escrow via `createEscrow`.
-4. Seller submits a non-empty encrypted delivery payload via `deliverEscrow(escrowId, encryptedKey)`.
+4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
 5. Contract pays seller immediately on successful delivery submission.
 
 ### Buyer flow
@@ -69,8 +69,9 @@ Escrow status:
 1. Generate buyer encryption keypair off-chain.
 2. Call `createEscrow(productId, buyerPubKey)` and pay exact `unitPrice`.
 3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
-4. Decrypt content key off-chain and use allocated item `contentCID`.
-5. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
+4. Read the delivered `contentCID` from the allocated item via `getProductItem(escrow.itemId)`.
+5. Decrypt content key off-chain and use the delivered `contentCID`.
+6. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
 
 ## Function Interface and Data Use
 
@@ -91,21 +92,21 @@ Writes:
 - new `Product`
 - `productsBySeller[msg.sender]`
 
-### `addItemsToProduct(uint256 productId, string[] contentCIDs)`
+### `addItemsToProduct(uint256 productId, uint256 count)`
 
 Inputs:
 
 - `productId`
-- `contentCIDs`: per-unit encrypted content pointers
+- `count`: number of inventory units to add
 
 Uses:
 
 - caller must be product seller
-- every CID must be non-empty
+- count must be greater than zero
 
 Writes:
 
-- appends `ProductItem` rows
+- appends empty `ProductItem` rows
 - appends to `productItemIds[productId]`
 - increments product `totalItems`
 
@@ -143,28 +144,31 @@ Writes:
 - marks one `ProductItem` as `consumed`
 - creates `Escrow` with product/item linkage, buyer/seller, amount, key, timestamps, deadline, status
 
-### `deliverEscrow(uint256 escrowId, bytes encryptedKey)`
+### `deliverEscrow(uint256 escrowId, string contentCID, bytes encryptedKey)`
 
 Inputs:
 
 - `escrowId`
+- `contentCID`
 - `encryptedKey`
 
 Uses:
 
 - caller must be escrow seller
 - escrow must be `Pending`
+- `contentCID` must be non-empty
 - must be on or before deadline
 
 Writes:
 
+- stores `contentCID` on the allocated `ProductItem`
 - stores `encryptedKey`
 - sets escrow status to `Delivered`
 - transfers escrow amount to seller
 
 Important:
 
-- the contract does not verify whether `encryptedKey` is correct for the buyer or the allocated item
+- the contract does not verify whether `contentCID` or `encryptedKey` are correct for the buyer or the allocated item
 
 ### `reclaimEscrow(uint256 escrowId)`
 

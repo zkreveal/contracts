@@ -6,7 +6,7 @@ This file freezes the current v0 architecture and naming for `ZkRevealStore`.
 
 - Seller identity is `address`.
 - `Product` is the reusable listing and price source.
-- `ProductItem` is one inventory unit under a product.
+- `ProductItem` is one inventory unit under a product, with `contentCID` assigned at delivery time.
 - `Escrow` is one purchase lifecycle tied to exactly one allocated product item.
 
 Core storage relations:
@@ -34,11 +34,11 @@ ID counters:
    - `MIN_REFUND_WINDOW = 5 minutes`
    - `MAX_REFUND_WINDOW = 30 days`
 7. v0 is trusted-seller mode:
-   - `deliverEscrow` only requires a non-empty payload
+   - `deliverEscrow` only requires non-empty `contentCID` and `encryptedKey`
    - payload correctness and buyer-side decryptability are off-chain concerns
 8. Escrow contents are not private on-chain:
    - `buyerPubKey` and `encryptedKey` are stored in escrow state
-   - `contentCID` is stored on each allocated `ProductItem`
+   - delivered `contentCID` is stored on each fulfilled `ProductItem`
 
 ## Product Semantics
 
@@ -72,23 +72,23 @@ Emits:
 
 - `ProductCreated`
 
-### `addItemsToProduct(productId, contentCIDs[])`
+### `addItemsToProduct(productId, count)`
 
 Inputs:
 
 - `productId`
-- `contentCIDs`
+- `count`
 
 Validation:
 
 - product exists
 - caller is product seller
-- array length > 0
-- each CID non-empty
+- count > 0
 
 Writes:
 
 - creates new `productItems[itemId]` entries
+- each new item starts with empty `contentCID`
 - appends each `itemId` to `productItemIds[productId]`
 - increments `products[productId].totalItems`
 
@@ -147,11 +147,12 @@ Emits:
 
 - `EscrowCreated`
 
-### `deliverEscrow(escrowId, encryptedKey)`
+### `deliverEscrow(escrowId, contentCID, encryptedKey)`
 
 Inputs:
 
 - `escrowId`
+- `contentCID`
 - `encryptedKey`
 
 Validation:
@@ -159,11 +160,13 @@ Validation:
 - escrow exists
 - caller is escrow seller
 - escrow status is `Pending`
+- `contentCID` non-empty
 - `encryptedKey` non-empty
 - current time must be less than or equal to escrow deadline
 
 Writes:
 
+- stores `productItems[escrow.itemId].contentCID`
 - stores `escrow.encryptedKey`
 - sets `escrow.status = Delivered`
 
@@ -177,7 +180,7 @@ Emits:
 
 Trust boundary:
 
-- the contract does not verify whether `encryptedKey` is valid for the buyer or bound to the allocated item
+- the contract does not verify whether `contentCID` or `encryptedKey` are valid for the buyer or bound to the allocated item
 
 ### `reclaimEscrow(escrowId)`
 

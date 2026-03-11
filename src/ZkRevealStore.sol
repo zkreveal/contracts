@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @title ZkRevealStore
 /// @notice Inventory-based encrypted delivery escrow for trusted-seller v0.
-/// @dev Sellers create products, add per-unit inventory items, buyers create escrows for product units, and settlement is escrow-based.
+/// @dev Sellers create products, add inventory units, buyers create escrows for product units, and settlement is escrow-based.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
@@ -160,28 +160,24 @@ contract ZkRevealStore is ReentrancyGuard {
         emit ProductCreated(productId, msg.sender, title, unitPrice, refundWindow);
     }
 
-    function addItemsToProduct(uint256 productId, string[] calldata contentCIDs) external productExists(productId) {
+    function addItemsToProduct(uint256 productId, uint256 count) external productExists(productId) {
         _onlyProductSeller(productId);
-        if (contentCIDs.length == 0) revert InvalidParams();
+        if (count == 0) revert InvalidParams();
 
         Product storage product = products[productId];
 
-        for (uint256 i = 0; i < contentCIDs.length; i++) {
-            string calldata cid = contentCIDs[i];
-            if (bytes(cid).length == 0) revert InvalidParams();
-
+        for (uint256 i = 0; i < count; i++) {
             uint256 itemId = nextItemId++;
 
             ProductItem storage productItem = productItems[itemId];
             productItem.productId = productId;
-            productItem.contentCID = cid;
             productItem.consumed = false;
 
             productItemIds[productId].push(itemId);
             product.totalItems += 1;
         }
 
-        emit ProductItemsAdded(productId, contentCIDs.length);
+        emit ProductItemsAdded(productId, count);
     }
 
     function setProductActive(uint256 productId, bool active) external productExists(productId) {
@@ -241,17 +237,27 @@ contract ZkRevealStore is ReentrancyGuard {
         emit EscrowCreated(escrowId, productId, itemId, product.seller, msg.sender, product.unitPrice);
     }
 
-    /// @notice Seller posts an encrypted delivery payload and receives escrowed funds.
-    /// @dev v0 only checks that the payload is non-empty and submitted on or before the deadline.
+    /// @notice Seller posts a content CID and encrypted delivery payload, then receives escrowed funds.
+    /// @dev v0 only checks that both values are non-empty and submitted on or before the deadline.
     ///      Payload correctness and buyer-side decryptability are verified off-chain.
-    function deliverEscrow(uint256 escrowId, bytes calldata encryptedKey) external escrowExists(escrowId) nonReentrant {
+    function deliverEscrow(uint256 escrowId, string calldata contentCID, bytes calldata encryptedKey)
+        external
+        escrowExists(escrowId)
+        nonReentrant
+    {
         _onlyEscrowSeller(escrowId);
 
         Escrow storage escrow = escrows[escrowId];
         if (escrow.status != EscrowStatus.Pending) revert BadState();
+        if (bytes(contentCID).length == 0) revert EmptyValue();
         if (encryptedKey.length == 0) revert EmptyValue();
         if (block.timestamp > escrow.deadline) revert DeadlinePassed();
 
+        ProductItem storage productItem = productItems[escrow.itemId];
+        if (productItem.productId != escrow.productId) revert BadState();
+        if (bytes(productItem.contentCID).length != 0) revert BadState();
+
+        productItem.contentCID = contentCID;
         escrow.encryptedKey = encryptedKey;
         escrow.status = EscrowStatus.Delivered;
 

@@ -31,9 +31,9 @@ contract ZkRevealStoreTest is Test {
         productId = store.createProduct(title, unitPrice, refundWindow);
     }
 
-    function _addItemsAsSeller(uint256 productId, string[] memory cids) internal {
+    function _addItemsAsSeller(uint256 productId, uint256 count) internal {
         vm.prank(seller);
-        store.addItemsToProduct(productId, cids);
+        store.addItemsToProduct(productId, count);
     }
 
     function _createEscrowAs(uint256 productId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
@@ -116,15 +116,10 @@ contract ZkRevealStoreTest is Test {
     function test_AddItems_AppendsInventory() public {
         uint256 productId = _createProductAsSeller();
 
-        string[] memory cids = new string[](3);
-        cids[0] = "ipfs://cid-1";
-        cids[1] = "ipfs://cid-2";
-        cids[2] = "ipfs://cid-3";
-
         vm.expectEmit(true, false, false, true);
         emit ZkRevealStore.ProductItemsAdded(productId, 3);
 
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 3);
 
         uint256[] memory itemIds = store.getProductItemIds(productId);
         assertEq(itemIds.length, 3);
@@ -138,57 +133,43 @@ contract ZkRevealStoreTest is Test {
         ZkRevealStore.ProductItem memory i2 = store.getProductItem(itemIds[2]);
 
         assertEq(i0.productId, productId);
-        assertEq(i0.contentCID, "ipfs://cid-1");
+        assertEq(i0.contentCID, "");
         assertEq(i0.consumed, false);
 
         assertEq(i1.productId, productId);
-        assertEq(i1.contentCID, "ipfs://cid-2");
+        assertEq(i1.contentCID, "");
         assertEq(i1.consumed, false);
 
         assertEq(i2.productId, productId);
-        assertEq(i2.contentCID, "ipfs://cid-3");
+        assertEq(i2.contentCID, "");
         assertEq(i2.consumed, false);
     }
 
-    function test_AddItems_InvalidCidReverts() public {
+    function test_AddItems_ZeroCountReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](2);
-        cids[0] = "ipfs://cid-1";
-        cids[1] = "";
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.addItemsToProduct(productId, cids);
+        store.addItemsToProduct(productId, 0);
     }
 
-    function test_AddItems_EmptyArrayReverts() public {
-        uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](0);
-
+    function test_AddItems_NonexistentProductReverts() public {
         vm.prank(seller);
-        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.addItemsToProduct(productId, cids);
+        vm.expectRevert(ZkRevealStore.ProductNotFound.selector);
+        store.addItemsToProduct(999, 1);
     }
 
     function test_Permissions_NonSellerCannotAddItems() public {
         uint256 productId = _createProductAsSeller();
 
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-
         vm.prank(attacker);
         vm.expectRevert(ZkRevealStore.NotProductSeller.selector);
-        store.addItemsToProduct(productId, cids);
+        store.addItemsToProduct(productId, 1);
     }
 
     function test_SetProductActive_TogglesAndBlocksEscrowCreation() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         vm.expectEmit(true, false, false, true);
         emit ZkRevealStore.ProductStatusChanged(productId, false);
@@ -217,11 +198,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_CreateEscrow_AllocatesAndCreatesEscrow() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](2);
-        cids[0] = "ipfs://cid-1";
-        cids[1] = "ipfs://cid-2";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 2);
 
         uint256 buyerBalBefore = buyer.balance;
 
@@ -242,6 +219,7 @@ contract ZkRevealStoreTest is Test {
         assertEq(escrow.deadline, escrow.createdAt + refundWindow);
 
         ZkRevealStore.ProductItem memory productItem = store.getProductItem(1);
+        assertEq(productItem.contentCID, "");
         assertEq(productItem.consumed, true);
 
         assertEq(buyer.balance, buyerBalBefore - unitPrice);
@@ -255,12 +233,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_CreateEscrow_SequentialAllocation() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](3);
-        cids[0] = "ipfs://cid-1";
-        cids[1] = "ipfs://cid-2";
-        cids[2] = "ipfs://cid-3";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 3);
 
         uint256 escrowId1 = _createEscrowAs(productId, buyer, buyerPubKey);
         uint256 escrowId2 = _createEscrowAs(productId, buyer2, buyer2PubKey);
@@ -276,10 +249,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_CreateEscrow_SoldOutReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         _createEscrowAs(productId, buyer, buyerPubKey);
 
@@ -290,10 +260,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_CreateEscrow_BadPriceReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.BadPrice.selector);
@@ -302,10 +269,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_CreateEscrow_EmptyPubKeyReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         vm.prank(buyer);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
@@ -320,38 +284,40 @@ contract ZkRevealStoreTest is Test {
 
     function test_Permissions_NonSellerCannotDeliverEscrow() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
         vm.prank(attacker);
         vm.expectRevert(ZkRevealStore.NotEscrowSeller.selector);
-        store.deliverEscrow(escrowId, hex"aa");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
     }
 
     function test_DeliverEscrow_EmptyEncryptedKeyReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.EmptyValue.selector);
-        store.deliverEscrow(escrowId, "");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", "");
+    }
+
+    function test_DeliverEscrow_EmptyContentCIDReverts() public {
+        uint256 productId = _createProductAsSeller();
+        _addItemsAsSeller(productId, 1);
+
+        uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.EmptyValue.selector);
+        store.deliverEscrow(escrowId, "", hex"aa");
     }
 
     function test_DeliverEscrow_HappyPathPaysSeller() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
         uint256 sellerBalBefore = seller.balance;
@@ -360,11 +326,14 @@ contract ZkRevealStoreTest is Test {
         emit ZkRevealStore.EscrowDelivered(escrowId);
 
         vm.prank(seller);
-        store.deliverEscrow(escrowId, hex"deadbeef");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"deadbeef");
 
         ZkRevealStore.Escrow memory escrow = store.getEscrow(escrowId);
         assertEq(uint8(escrow.status), uint8(ZkRevealStore.EscrowStatus.Delivered));
         assertEq(escrow.encryptedKey, hex"deadbeef");
+
+        ZkRevealStore.ProductItem memory productItem = store.getProductItem(escrow.itemId);
+        assertEq(productItem.contentCID, "ipfs://cid-1");
 
         assertEq(seller.balance, sellerBalBefore + unitPrice);
         assertEq(address(store).balance, 0);
@@ -372,10 +341,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_DeliverEscrow_AtDeadlineSucceeds() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
@@ -383,34 +349,29 @@ contract ZkRevealStoreTest is Test {
         vm.warp(uint256(deadline));
 
         vm.prank(seller);
-        store.deliverEscrow(escrowId, hex"aa");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
         assertEq(uint8(store.getEscrow(escrowId).status), uint8(ZkRevealStore.EscrowStatus.Delivered));
+        assertEq(store.getProductItem(store.getEscrow(escrowId).itemId).contentCID, "ipfs://cid-1");
     }
 
     function test_DeliverEscrow_CannotDeliverTwice() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
         vm.prank(seller);
-        store.deliverEscrow(escrowId, hex"aa");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.BadState.selector);
-        store.deliverEscrow(escrowId, hex"bb");
+        store.deliverEscrow(escrowId, "ipfs://cid-2", hex"bb");
     }
 
     function test_DeliverEscrow_AfterDeadlineReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
@@ -419,7 +380,7 @@ contract ZkRevealStoreTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.DeadlinePassed.selector);
-        store.deliverEscrow(escrowId, hex"aa");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
     }
 
     function test_Getters_NonexistentIdsRevert() public {
@@ -435,10 +396,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_Permissions_NonBuyerCannotReclaim() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
@@ -451,10 +409,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_ReclaimEscrow_AfterDeadlineRefundsBuyer() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 buyerBalBefore = buyer.balance;
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
@@ -474,16 +429,14 @@ contract ZkRevealStoreTest is Test {
 
         // Consumed inventory stays consumed (no recycle)
         ZkRevealStore.ProductItem memory productItem = store.getProductItem(escrow.itemId);
+        assertEq(productItem.contentCID, "");
         assertEq(productItem.consumed, true);
         assertEq(store.getProductRemainingItems(productId), 0);
     }
 
     function test_ReclaimEscrow_BeforeDeadlineReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
@@ -494,10 +447,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_ReclaimEscrow_CannotReclaimTwice() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
@@ -514,15 +464,12 @@ contract ZkRevealStoreTest is Test {
 
     function test_ReclaimEscrow_AfterDeliveryReverts() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](1);
-        cids[0] = "ipfs://cid-1";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 1);
 
         uint256 escrowId = _createEscrowAs(productId, buyer, buyerPubKey);
 
         vm.prank(seller);
-        store.deliverEscrow(escrowId, hex"aa");
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
         vm.warp(uint256(store.getEscrow(escrowId).deadline) + 1);
 
@@ -533,11 +480,7 @@ contract ZkRevealStoreTest is Test {
 
     function test_ViewHelpers_InventorySummary() public {
         uint256 productId = _createProductAsSeller();
-
-        string[] memory cids = new string[](2);
-        cids[0] = "ipfs://cid-1";
-        cids[1] = "ipfs://cid-2";
-        _addItemsAsSeller(productId, cids);
+        _addItemsAsSeller(productId, 2);
 
         _assertInventory(productId, 2, 0, 2, false);
 
