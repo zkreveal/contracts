@@ -12,6 +12,30 @@ zkReveal uses a hierarchical model:
 
 Seller identity is the seller wallet address.
 
+## Security Model (v0)
+
+This contract is a trusted-seller delivery escrow, not a trustless proof system.
+
+- `deliverEscrow` only verifies that `encryptedKey` is non-empty and submitted on or before the escrow deadline.
+- The contract does not prove that the payload decrypts correctly or matches the allocated item.
+- Seller is paid immediately after successful delivery submission.
+- Correctness of the delivered payload is verified off-chain by the buyer.
+
+## On-Chain Visibility
+
+The following data is public on-chain or retrievable from contract state:
+
+- `ProductItem.contentCID`
+- `Escrow.buyerPubKey`
+- `Escrow.encryptedKey`
+- escrow timestamps, status, seller, buyer, product id, and item id
+
+The following data is not stored on-chain:
+
+- plaintext content
+- buyer private key
+- decrypted symmetric key material
+
 ## Core Contract
 
 - `src/ZkRevealStore.sol`
@@ -37,14 +61,14 @@ Escrow status:
 1. Create product via `createProduct(title, unitPrice, refundWindow)`.
 2. Add inventory CIDs via `addItemsToProduct(productId, contentCIDs)`.
 3. Buyer creates escrow via `createEscrow`.
-4. Seller submits encrypted delivery key via `deliverEscrow(escrowId, encryptedKey)`.
+4. Seller submits a non-empty encrypted delivery payload via `deliverEscrow(escrowId, encryptedKey)`.
 5. Contract pays seller immediately on successful delivery submission.
 
 ### Buyer flow
 
 1. Generate buyer encryption keypair off-chain.
 2. Call `createEscrow(productId, buyerPubKey)` and pay exact `unitPrice`.
-3. Wait for seller delivery; read `escrow.encryptedKey` from `getEscrow`.
+3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
 4. Decrypt content key off-chain and use allocated item `contentCID`.
 5. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
 
@@ -130,13 +154,17 @@ Uses:
 
 - caller must be escrow seller
 - escrow must be `Pending`
-- must be before deadline
+- must be on or before deadline
 
 Writes:
 
 - stores `encryptedKey`
 - sets escrow status to `Delivered`
 - transfers escrow amount to seller
+
+Important:
+
+- the contract does not verify whether `encryptedKey` is correct for the buyer or the allocated item
 
 ### `reclaimEscrow(uint256 escrowId)`
 

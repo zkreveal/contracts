@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title ZkRevealStore
-/// @notice Inventory-based encrypted delivery escrow.
+/// @notice Inventory-based encrypted delivery escrow for trusted-seller v0.
 /// @dev Sellers create products, add per-unit inventory items, buyers create escrows for product units, and settlement is escrow-based.
 contract ZkRevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
@@ -241,6 +241,9 @@ contract ZkRevealStore is ReentrancyGuard {
         emit EscrowCreated(escrowId, productId, itemId, product.seller, msg.sender, product.unitPrice);
     }
 
+    /// @notice Seller posts an encrypted delivery payload and receives escrowed funds.
+    /// @dev v0 only checks that the payload is non-empty and submitted on or before the deadline.
+    ///      Payload correctness and buyer-side decryptability are verified off-chain.
     function deliverEscrow(uint256 escrowId, bytes calldata encryptedKey) external escrowExists(escrowId) nonReentrant {
         _onlyEscrowSeller(escrowId);
 

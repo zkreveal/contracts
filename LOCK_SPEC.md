@@ -33,6 +33,12 @@ ID counters:
 6. Window bounds are enforced globally:
    - `MIN_REFUND_WINDOW = 5 minutes`
    - `MAX_REFUND_WINDOW = 30 days`
+7. v0 is trusted-seller mode:
+   - `deliverEscrow` only requires a non-empty payload
+   - payload correctness and buyer-side decryptability are off-chain concerns
+8. Escrow contents are not private on-chain:
+   - `buyerPubKey` and `encryptedKey` are stored in escrow state
+   - `contentCID` is stored on each allocated `ProductItem`
 
 ## Product Semantics
 
@@ -154,7 +160,7 @@ Validation:
 - caller is escrow seller
 - escrow status is `Pending`
 - `encryptedKey` non-empty
-- before escrow deadline
+- current time must be less than or equal to escrow deadline
 
 Writes:
 
@@ -168,6 +174,10 @@ External transfer:
 Emits:
 
 - `EscrowDelivered`
+
+Trust boundary:
+
+- the contract does not verify whether `encryptedKey` is valid for the buyer or bound to the allocated item
 
 ### `reclaimEscrow(escrowId)`
 
