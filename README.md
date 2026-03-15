@@ -6,7 +6,7 @@ Inventory-based encrypted delivery escrow in Solidity (Foundry project).
 
 zkReveal uses a hierarchical model:
 
-- `Listing`: reusable sale entry with shared metadata and per-unit price.
+- `Listing`: reusable sale entry with human-readable `title`, seller-defined `resourceId`, and per-unit price.
 - `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
 - `Escrow`: one buyer purchase tied to exactly one allocated inventory unit.
 
@@ -25,6 +25,7 @@ This contract is a trusted-seller delivery escrow, not a trustless proof system.
 
 The following data is public on-chain or retrievable from contract state:
 
+- listing `title` and `resourceId`
 - delivered `InventoryUnit.contentCID`
 - `Escrow.buyerPubKey`
 - `Escrow.encryptedKey`
@@ -54,11 +55,27 @@ Escrow status:
 - `Delivered`
 - `Reclaimed`
 
+## Listing Identity
+
+- `listingId` is the canonical protocol-local on-chain identifier.
+- `resourceId` is a seller-defined, machine-readable, non-normalized identifier for integrations.
+- `resourceId` is not unique and must not be treated as a globally safe identifier by itself.
+
+For off-chain canonical identity, prefer:
+
+- `(chainId, contractAddress, listingId)`
+
+For off-chain semantic identity, prefer:
+
+- `(chainId, contractAddress, seller, resourceId)`
+
+Treat each escrow as a purchase receipt. A delivered escrow is a delivered claim for the listing's semantic resource identity.
+
 ## High-Level Flows
 
 ### Seller flow
 
-1. Create listing via `createListing(title, unitPrice, refundWindow)`.
+1. Create listing via `createListing(title, resourceId, unitPrice, refundWindow)`.
 2. Add inventory units via `addInventoryUnitsToListing(listingId, count)`.
 3. Buyer creates escrow via `createEscrow`.
 4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
@@ -75,17 +92,18 @@ Escrow status:
 
 ## Function Interface and Data Use
 
-### `createListing(string title, uint256 unitPrice, uint64 refundWindow)`
+### `createListing(string title, string resourceId, uint256 unitPrice, uint64 refundWindow)`
 
 Inputs:
 
 - `title`: listing name
+- `resourceId`: seller-defined semantic identifier for integrations
 - `unitPrice`: price per item
 - `refundWindow`: escrow reclaim window
 
 Uses:
 
-- validates non-empty title, non-zero price, and refund window bounds
+- validates non-empty title, non-empty resourceId, non-zero price, and refund window bounds
 
 Writes:
 
@@ -190,12 +208,12 @@ Writes:
 
 ## Events
 
-- `ListingCreated`
+- `ListingCreated` includes `resourceId`
 - `InventoryUnitAdded`
 - `ListingStatusChanged`
-- `EscrowCreated`
-- `EscrowDelivered`
-- `EscrowReclaimed`
+- `EscrowCreated` keeps prior fields and appends `resourceId`
+- `EscrowDelivered` includes `listingId`, `buyer`, `resourceId`, and `contentCID`
+- `EscrowReclaimed` includes `listingId`, `buyer`, and `resourceId`
 
 ## Deployments
 

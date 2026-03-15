@@ -13,6 +13,7 @@ contract ZkRevealStoreTest is Test {
     address attacker = address(0xD00D);
 
     string title = "Pro Dataset";
+    string resourceId = "dataset/btc-signals-mar-2026";
     uint256 unitPrice = 0.1 ether;
     uint64 refundWindow = 1 hours;
     bytes buyerPubKey = hex"01020304";
@@ -28,7 +29,7 @@ contract ZkRevealStoreTest is Test {
 
     function _createListingAsSeller() internal returns (uint256 listingId) {
         vm.prank(seller);
-        listingId = store.createListing(title, unitPrice, refundWindow);
+        listingId = store.createListing(title, resourceId, unitPrice, refundWindow);
     }
 
     function _addInventoryUnitsAsSeller(uint256 listingId, uint256 count) internal {
@@ -57,11 +58,11 @@ contract ZkRevealStoreTest is Test {
     }
 
     function test_ListingCreated_Emits() public {
-        vm.expectEmit(true, true, true, true);
-        emit ZkRevealStore.ListingCreated(1, seller, title, unitPrice, refundWindow);
+        vm.expectEmit(true, true, false, true);
+        emit ZkRevealStore.ListingCreated(1, seller, title, resourceId, unitPrice, refundWindow);
 
         vm.prank(seller);
-        store.createListing(title, unitPrice, refundWindow);
+        store.createListing(title, resourceId, unitPrice, refundWindow);
     }
 
     function test_CreateListing_SetsFields() public {
@@ -70,12 +71,34 @@ contract ZkRevealStoreTest is Test {
         ZkRevealStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.seller, seller);
         assertEq(listing.title, title);
+        assertEq(listing.resourceId, resourceId);
         assertEq(listing.unitPrice, unitPrice);
         assertEq(listing.refundWindow, refundWindow);
         assertEq(listing.active, true);
         assertEq(listing.nextInventoryUnitIndex, 0);
         assertEq(listing.totalInventoryUnits, 0);
         assertEq(listing.soldInventoryUnits, 0);
+
+        (
+            address listingSeller,
+            string memory listingTitle,
+            string memory listingResourceId,
+            uint256 listingUnitPrice,
+            uint64 listingRefundWindow,
+            bool listingActive,
+            uint256 nextInventoryUnitIndex,
+            uint256 totalInventoryUnits,
+            uint256 soldInventoryUnits
+        ) = store.listings(listingId);
+        assertEq(listingSeller, seller);
+        assertEq(listingTitle, title);
+        assertEq(listingResourceId, resourceId);
+        assertEq(listingUnitPrice, unitPrice);
+        assertEq(listingRefundWindow, refundWindow);
+        assertEq(listingActive, true);
+        assertEq(nextInventoryUnitIndex, 0);
+        assertEq(totalInventoryUnits, 0);
+        assertEq(soldInventoryUnits, 0);
 
         uint256[] memory ids = store.getListingsBySeller(seller);
         assertEq(ids.length, 1);
@@ -92,25 +115,40 @@ contract ZkRevealStoreTest is Test {
         assertEq(ids[1], listingId2);
     }
 
+    function test_CreateListing_AllowsWhitespaceOnlyResourceId() public {
+        vm.prank(seller);
+        uint256 listingId = store.createListing(title, "   ", unitPrice, refundWindow);
+
+        ZkRevealStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.resourceId, "   ");
+
+        (,, string memory listingResourceId,,,,,,) = store.listings(listingId);
+        assertEq(listingResourceId, "   ");
+    }
+
     function test_CreateListingInvalidParams_Reverts() public {
         uint64 tooShort = store.MIN_REFUND_WINDOW() - 1;
         uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createListing("", unitPrice, refundWindow);
+        store.createListing("", resourceId, unitPrice, refundWindow);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createListing(title, 0, refundWindow);
+        store.createListing(title, "", unitPrice, refundWindow);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createListing(title, unitPrice, tooShort);
+        store.createListing(title, resourceId, 0, refundWindow);
 
         vm.prank(seller);
         vm.expectRevert(ZkRevealStore.InvalidParams.selector);
-        store.createListing(title, unitPrice, tooLong);
+        store.createListing(title, resourceId, unitPrice, tooShort);
+
+        vm.prank(seller);
+        vm.expectRevert(ZkRevealStore.InvalidParams.selector);
+        store.createListing(title, resourceId, unitPrice, tooLong);
     }
 
     function test_AddInventoryUnitsToListing_AppendsInventory() public {
@@ -203,7 +241,7 @@ contract ZkRevealStoreTest is Test {
         uint256 buyerBalBefore = buyer.balance;
 
         vm.expectEmit(true, true, true, true);
-        emit ZkRevealStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice);
+        emit ZkRevealStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice, resourceId);
 
         uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
@@ -322,8 +360,8 @@ contract ZkRevealStoreTest is Test {
         uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
         uint256 sellerBalBefore = seller.balance;
 
-        vm.expectEmit(true, false, false, true);
-        emit ZkRevealStore.EscrowDelivered(escrowId);
+        vm.expectEmit(true, true, true, true);
+        emit ZkRevealStore.EscrowDelivered(escrowId, listingId, buyer, resourceId, "ipfs://cid-1");
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"deadbeef");
@@ -417,8 +455,8 @@ contract ZkRevealStoreTest is Test {
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
-        vm.expectEmit(true, false, false, true);
-        emit ZkRevealStore.EscrowReclaimed(escrowId);
+        vm.expectEmit(true, true, true, true);
+        emit ZkRevealStore.EscrowReclaimed(escrowId, listingId, buyer, resourceId);
 
         vm.prank(buyer);
         store.reclaimEscrow(escrowId);

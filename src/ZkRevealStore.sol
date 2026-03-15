@@ -19,6 +19,7 @@ contract ZkRevealStore is ReentrancyGuard {
     struct Listing {
         address seller;
         string title;
+        string resourceId;
         uint256 unitPrice;
         uint64 refundWindow;
         bool active;
@@ -59,25 +60,38 @@ contract ZkRevealStore is ReentrancyGuard {
     mapping(uint256 => uint256[]) public listingInventoryUnitIds;
 
     event ListingCreated(
-        uint256 indexed listingId, address indexed seller, string title, uint256 unitPrice, uint64 refundWindow
+        uint256 indexed listingId,
+        address indexed seller,
+        string title,
+        string resourceId,
+        uint256 unitPrice,
+        uint64 refundWindow
     );
 
     event InventoryUnitAdded(uint256 indexed listingId, uint256 count);
 
     event ListingStatusChanged(uint256 indexed listingId, bool active);
 
+    /// @dev `listingId` is the canonical on-chain identity; `resourceId` is seller-defined semantic metadata.
     event EscrowCreated(
         uint256 indexed escrowId,
         uint256 indexed listingId,
         uint256 indexed inventoryUnitId,
         address seller,
         address buyer,
-        uint256 amount
+        uint256 amount,
+        string resourceId
     );
 
-    event EscrowDelivered(uint256 indexed escrowId);
+    /// @dev Emits canonical escrow/listing identifiers plus non-canonical `resourceId` metadata for off-chain consumers.
+    event EscrowDelivered(
+        uint256 indexed escrowId, uint256 indexed listingId, address indexed buyer, string resourceId, string contentCID
+    );
 
-    event EscrowReclaimed(uint256 indexed escrowId);
+    /// @dev Emits canonical escrow/listing identifiers plus non-canonical `resourceId` metadata for off-chain consumers.
+    event EscrowReclaimed(
+        uint256 indexed escrowId, uint256 indexed listingId, address indexed buyer, string resourceId
+    );
 
     error ListingNotFound();
     error InventoryUnitNotFound();
@@ -135,11 +149,14 @@ contract ZkRevealStore is ReentrancyGuard {
         if (escrows[escrowId].buyer != msg.sender) revert NotEscrowBuyer();
     }
 
-    function createListing(string calldata title, uint256 unitPrice, uint64 refundWindow)
+    /// @notice Create a seller-owned listing with a human-readable title and seller-defined semantic resource identifier.
+    /// @dev `listingId` remains the canonical on-chain identifier; `resourceId` is a non-unique, non-normalized off-chain hint.
+    function createListing(string calldata title, string calldata resourceId, uint256 unitPrice, uint64 refundWindow)
         external
         returns (uint256 listingId)
     {
         if (bytes(title).length == 0) revert InvalidParams();
+        if (bytes(resourceId).length == 0) revert InvalidParams();
         if (unitPrice == 0) revert InvalidParams();
         if (refundWindow < MIN_REFUND_WINDOW || refundWindow > MAX_REFUND_WINDOW) revert InvalidParams();
 
@@ -148,6 +165,7 @@ contract ZkRevealStore is ReentrancyGuard {
         Listing storage listing = listings[listingId];
         listing.seller = msg.sender;
         listing.title = title;
+        listing.resourceId = resourceId;
         listing.unitPrice = unitPrice;
         listing.refundWindow = refundWindow;
         listing.active = true;
@@ -157,7 +175,7 @@ contract ZkRevealStore is ReentrancyGuard {
 
         listingsBySeller[msg.sender].push(listingId);
 
-        emit ListingCreated(listingId, msg.sender, title, unitPrice, refundWindow);
+        emit ListingCreated(listingId, msg.sender, title, resourceId, unitPrice, refundWindow);
     }
 
     function addInventoryUnitsToListing(uint256 listingId, uint256 count) external listingExists(listingId) {
@@ -234,7 +252,9 @@ contract ZkRevealStore is ReentrancyGuard {
         escrow.deadline = escrow.createdAt + listing.refundWindow;
         escrow.status = EscrowStatus.Pending;
 
-        emit EscrowCreated(escrowId, listingId, inventoryUnitId, listing.seller, msg.sender, listing.unitPrice);
+        emit EscrowCreated(
+            escrowId, listingId, inventoryUnitId, listing.seller, msg.sender, listing.unitPrice, listing.resourceId
+        );
     }
 
     /// @notice Seller posts a content CID and encrypted delivery payload, then receives escrowed funds.
@@ -260,11 +280,13 @@ contract ZkRevealStore is ReentrancyGuard {
         inventoryUnit.contentCID = contentCID;
         escrow.encryptedKey = encryptedKey;
         escrow.status = EscrowStatus.Delivered;
+        Listing storage listing = listings[escrow.listingId];
+        string memory listingResourceId = listing.resourceId;
 
         (bool ok,) = escrow.seller.call{value: escrow.amount}("");
         if (!ok) revert PayFail();
 
-        emit EscrowDelivered(escrowId);
+        emit EscrowDelivered(escrowId, escrow.listingId, escrow.buyer, listingResourceId, contentCID);
     }
 
     function reclaimEscrow(uint256 escrowId) external escrowExists(escrowId) nonReentrant {
@@ -275,11 +297,13 @@ contract ZkRevealStore is ReentrancyGuard {
         if (block.timestamp <= escrow.deadline) revert DeadlineNotPassed();
 
         escrow.status = EscrowStatus.Reclaimed;
+        Listing storage listing = listings[escrow.listingId];
+        string memory listingResourceId = listing.resourceId;
 
         (bool ok,) = escrow.buyer.call{value: escrow.amount}("");
         if (!ok) revert RefundFail();
 
-        emit EscrowReclaimed(escrowId);
+        emit EscrowReclaimed(escrowId, escrow.listingId, escrow.buyer, listingResourceId);
     }
 
     function getListingsBySeller(address seller) external view returns (uint256[] memory) {

@@ -42,24 +42,43 @@ ID counters:
 
 ## Listing Semantics
 
+`Listing.title` is human-readable display text.  
+`Listing.resourceId` is a seller-defined, machine-readable, non-normalized semantic identifier.  
+`listingId` remains the canonical protocol-local on-chain identifier.  
 `Listing.unitPrice` is per-unit price.  
 `Listing.totalInventoryUnits` counts all units ever added.  
 `Listing.soldInventoryUnits` counts all allocated/consumed units.  
 `Listing.active` gates new escrow creation only.
 
+## Integration Safety
+
+Do not key claims by bare `resourceId`.
+
+Preferred canonical off-chain identity:
+
+- `(chainId, contractAddress, listingId)`
+
+Preferred off-chain identity:
+
+- `(chainId, contractAddress, seller, resourceId)`
+
+A delivered escrow can be interpreted off-chain as a delivered purchase claim for that identity tuple.
+
 ## Function Contract (Inputs and State Usage)
 
-### `createListing(title, unitPrice, refundWindow) -> listingId`
+### `createListing(title, resourceId, unitPrice, refundWindow) -> listingId`
 
 Inputs:
 
 - `title`
+- `resourceId`
 - `unitPrice`
 - `refundWindow`
 
 Validation:
 
 - title non-empty
+- resourceId non-empty
 - unitPrice > 0
 - refundWindow in `[MIN_REFUND_WINDOW, MAX_REFUND_WINDOW]`
 
@@ -209,9 +228,9 @@ Emits:
 
 ## Locked Events
 
-- `ListingCreated(uint256,address,string,uint256,uint64)`
+- `ListingCreated(uint256,address,string,string,uint256,uint64)`
 - `InventoryUnitAdded(uint256,uint256)`
 - `ListingStatusChanged(uint256,bool)`
-- `EscrowCreated(uint256,uint256,uint256,address,address,uint256)`
-- `EscrowDelivered(uint256)`
-- `EscrowReclaimed(uint256)`
+- `EscrowCreated(uint256,uint256,uint256,address,address,uint256,string)`
+- `EscrowDelivered(uint256,uint256,address,string,string)`
+- `EscrowReclaimed(uint256,uint256,address,string)`
