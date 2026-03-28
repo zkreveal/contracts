@@ -217,14 +217,11 @@ Writes:
 
 ## Deployments
 
-### Sonic Testnet
+### Arbitrum Sepolia
 
-- Chain ID: `14601`
-- ZkRevealStore: `0x5696622bEBEbA3005E2DbfED88154bE5d0F17C49`
-- Tx: `0x6e9210377c69c77ac48390fff6aa08d14c38b272951a7ec77f747c903235ef11`
-- Block: `12756899`
-- Compiler: `0.8.24`
-- EVM Version: `paris`
+- ZkRevealStore: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
+- Tx: `0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f`
+- Block: `254067517`
 
 ## Development
 
