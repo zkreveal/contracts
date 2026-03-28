@@ -223,6 +223,9 @@ Writes:
 - Tx: `0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f`
 - Block: `254067517`
 
+### Mainnet
+- Planned target: Arbitrum One
+
 ## Development
 
 ```bash
