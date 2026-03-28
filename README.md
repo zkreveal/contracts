@@ -1,8 +1,58 @@
 # zkReveal
 
-Inventory-based encrypted delivery escrow in Solidity (Foundry project).
+zkReveal is an on-chain encrypted digital delivery escrow primitive.
 
-## Current Design (v0)
+It enables sellers to deliver encrypted access (files, credentials, or content) to buyers using time-bound escrow, where delivery is enforced on-chain and decryption happens off-chain.
+
+This repository contains the v0 smart contract implementation built with Foundry and deployed on Arbitrum Sepolia.
+
+zkReveal is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems.
+It focuses purely on enforcement and settlement, leaving validation and UX to integrators.
+
+## Why zkReveal
+
+Most digital commerce today relies on trusted platforms to handle delivery of digital goods.
+
+zkReveal introduces a minimal on-chain primitive for:
+- encrypted delivery of digital assets
+- time-bound escrow with automatic refund
+- composable purchase receipts on-chain
+
+This enables new patterns for:
+- private data marketplaces
+- API key or credential delivery
+- gated content and access systems
+
+## Why Arbitrum
+
+zkReveal benefits from Arbitrum’s:
+
+- low transaction costs for frequent escrow creation
+- fast confirmations for buyer-seller interactions
+- strong EVM compatibility and tooling
+- suitability for building higher-level protocols on top
+
+Arbitrum provides a practical base layer for scaling encrypted delivery primitives into real-world applications.
+
+> ⚠️ **Warning**
+> This is a v0 trusted-seller escrow model.  
+> The contract enforces delivery timing but does not verify correctness of delivered content.  
+> Do not use in production without further validation and auditing.
+
+## System Flow
+
+Seller creates listing
+→ Adds inventory units
+→ Buyer opens escrow with public key
+→ Seller delivers encrypted payload + CID before deadline
+
+Outcome:
+- Delivered → seller paid
+- Timeout → buyer refunded
+
+This flow ensures that payment is conditional on timely delivery, while keeping content encryption and verification fully off-chain.
+
+## Architecture (v0)
 
 zkReveal uses a hierarchical model:
 
@@ -10,7 +60,7 @@ zkReveal uses a hierarchical model:
 - `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
 - `Escrow`: one buyer purchase tied to exactly one allocated inventory unit.
 
-Seller identity is the seller wallet address.
+Seller identity is defined by the seller’s wallet address.
 
 ## Security Model (v0)
 
@@ -69,7 +119,7 @@ For off-chain semantic identity, prefer:
 
 - `(chainId, contractAddress, seller, resourceId)`
 
-Treat each escrow as a purchase receipt. A delivered escrow is a delivered claim for the listing's semantic resource identity.
+Each escrow can be treated as an on-chain purchase receipt. A delivered escrow is a delivered claim for the listing's semantic resource identity.
 
 ## High-Level Flows
 
@@ -184,7 +234,7 @@ Writes:
 - sets escrow status to `Delivered`
 - transfers escrow amount to seller
 
-Important:
+**Note:**
 
 - the contract does not verify whether `contentCID` or `encryptedKey` are correct for the buyer or the allocated item
 
@@ -204,7 +254,7 @@ Writes:
 
 - sets escrow status to `Reclaimed`
 - refunds escrow amount to buyer
-- inventory is not restored
+- inventory units are not restored after reclaim
 
 ## Events
 
@@ -219,17 +269,32 @@ Writes:
 
 ### Arbitrum Sepolia
 
-- ZkRevealStore: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
-- Tx: `0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f`
-- Block: `254067517`
+- Status: Deployed and live on Arbitrum Sepolia
+- Chain ID: 421614
+- Contract: 0x80d0943a39B394e8a5B942c25D90bbB097c762bB
+- Transaction: https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f
+- Block: 254067517
 
 ### Mainnet
 - Planned target: Arbitrum One
+
+## Setup
+Environment variables:
+
+```bash
+export DEPLOYER_PRIVATE_KEY="0xx"         
+export RPC_ARB_SEPOLIA="https://sepolia-rollup.arbitrum.io/rpc"
+```
 
 ## Development
 
 ```bash
 forge build
 forge fmt --check
-forge test --offline
+forge test
 ```
+
+## Additional Docs
+
+- `docs/ENCRYPTION_SPEC_V0.md` — encryption and delivery model
+- `docs/LOCK_SPEC.md` — escrow lifecycle and state transitions
