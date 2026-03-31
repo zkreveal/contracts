@@ -1,8 +1,8 @@
-# zkReveal Encryption Spec v0
+# Reveal Protocol Encryption Spec v0
 
 ## Status
 
-Draft v0 for zkReveal encrypted digital delivery.
+Draft v0 for Reveal Protocol encrypted digital delivery.
 
 This document locks the canonical v0 wire format used at the contract boundary.
 
@@ -10,7 +10,7 @@ This document locks the canonical v0 wire format used at the contract boundary.
 
 ## 1. Purpose
 
-zkReveal v0 defines a minimal encryption and delivery standard for encrypted digital goods sold through time-bound escrow.
+Reveal Protocol v0 defines a minimal encryption and delivery standard for encrypted digital goods sold through time-bound escrow.
 
 The goals are:
 
@@ -18,7 +18,7 @@ The goals are:
 - keep onchain delivery small
 - ensure only the intended buyer can decrypt
 - keep the seller flow practical for v0
-- leave room for stronger commitment / zk-based delivery in future versions
+- leave room for stronger commitment or proof-based delivery in future versions
 
 This spec is intentionally simple and implementation-friendly.
 
@@ -26,7 +26,7 @@ This spec is intentionally simple and implementation-friendly.
 
 ## 2. High-Level Model
 
-zkReveal uses **envelope encryption**.
+Reveal Protocol uses **envelope encryption**.
 
 Instead of encrypting the payload directly with the buyer’s public key, the seller:
 
@@ -53,9 +53,9 @@ Owns the digital good and prepares encrypted inventory.
 
 Provides a public encryption key during escrow creation and later decrypts the delivered content.
 
-### zkReveal Contract
+### RevealStore Contract
 
-Stores escrow state and buyer-specific encrypted delivery material. It does not decrypt or inspect the payload.
+The `RevealStore` contract stores escrow state and buyer-specific encrypted delivery material. It does not decrypt or inspect the payload.
 
 ---
 
@@ -214,7 +214,7 @@ This object is stored offchain and referenced by `contentCID`.
 
 ```json
 {
-  "version": "zkreveal-v0",
+  "version": "reveal-v0",
   "cipher": "XCHACHA20-POLY1305",
   "nonce": "<base64>",
   "ciphertext": "<base64>",
@@ -224,7 +224,7 @@ This object is stored offchain and referenced by `contentCID`.
 
 #### Fields
 
-- `version`: must be `"zkreveal-v0"`
+- `version`: must be `"reveal-v0"`
 - `cipher`: must be `"XCHACHA20-POLY1305"` in v0
 - `nonce`: base64-encoded 24-byte nonce used for payload encryption
 - `ciphertext`: base64-encoded encrypted payload bytes
@@ -309,7 +309,7 @@ At delivery time, the contract only needs to record the delivered `contentCID` p
 
 ## 9. Required Seller Behavior
 
-A conforming zkReveal v0 seller implementation must:
+A conforming Reveal Protocol v0 seller implementation must:
 
 1. generate a fresh random `contentKey` per inventory unit
 2. encrypt the payload before upload
@@ -324,7 +324,7 @@ A conforming zkReveal v0 seller implementation must:
 
 ## 10. Required Buyer Behavior
 
-A conforming zkReveal v0 buyer implementation must:
+A conforming Reveal Protocol v0 buyer implementation must:
 
 1. generate or provide a valid encryption keypair
 2. submit the public encryption key during escrow creation
@@ -397,7 +397,7 @@ The contract manages escrow state; encryption/decryption remain offchain.
 
 ## 13. Non-Goals for v0
 
-zkReveal v0 does **not** try to solve:
+Reveal Protocol v0 does **not** try to solve:
 
 - cryptographic proof that seller payload matches a prior commitment
 - zero-knowledge correctness proofs
@@ -494,7 +494,7 @@ Use:
 
 ```ts
 type EncryptedPayloadEnvelopeV0 = {
-  version: "zkreveal-v0";
+  version: "reveal-v0";
   cipher: "XCHACHA20-POLY1305";
   nonce: string;        // base64
   ciphertext: string;   // base64
@@ -534,7 +534,7 @@ const ciphertext = encryptXChaCha20Poly1305(
 );
 
 const envelope = {
-  version: "zkreveal-v0",
+  version: "reveal-v0",
   cipher: "XCHACHA20-POLY1305",
   nonce: toBase64(payloadNonce),
   ciphertext: toBase64(ciphertext),
@@ -597,7 +597,7 @@ const plaintext = decryptXChaCha20Poly1305(
 
 ## 20. Why This Design
 
-This v0 design is strong because it gives zkReveal a clean and credible minimum architecture:
+This v0 design is strong because it gives Reveal Protocol a clean and credible minimum architecture:
 
 - payload stays offchain
 - delivery stays lightweight
@@ -627,9 +627,9 @@ So this is a very good minimum foundation.
 
 ---
 
-## 22. Opinionated Canonical Defaults for zkReveal v0
+## 22. Opinionated Canonical Defaults for Reveal Protocol v0
 
-If zkReveal wants one canonical choice with no ambiguity, lock these defaults:
+If Reveal Protocol wants one canonical choice with no ambiguity, lock these defaults:
 
 - buyer key type: **X25519**
 - payload cipher: **XChaCha20-Poly1305**
@@ -641,10 +641,10 @@ If zkReveal wants one canonical choice with no ambiguity, lock these defaults:
 - plaintext payload: **arbitrary bytes**
 - seller responsibility: **store `{ contentCID, contentKey }` offchain until delivery**
 
-These defaults make zkReveal v0 feel clean, serious, and protocol-grade.
+These defaults make Reveal Protocol v0 feel clean, serious, and protocol-grade.
 
 ---
 
 ## 23. One-Line Summary
 
-**zkReveal v0 uses envelope encryption: the seller encrypts the payload once offchain with a random symmetric key, then wraps that key with libsodium `crypto_box_seal` for the buyer and delivers the raw wrapped bytes onchain alongside the `contentCID`.**
+**Reveal Protocol v0 uses envelope encryption: the seller encrypts the payload once offchain with a random symmetric key, then wraps that key with libsodium `crypto_box_seal` for the buyer and delivers the raw wrapped bytes onchain alongside the `contentCID`.**

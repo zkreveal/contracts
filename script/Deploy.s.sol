@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
-import {ZkRevealStore} from "../src/ZkRevealStore.sol";
+import {RevealStore} from "../src/RevealStore.sol";
 
 contract Deploy is Script {
     function run() external {
@@ -14,9 +14,9 @@ contract Deploy is Script {
         console2.log("ChainId:", block.chainid);
 
         vm.startBroadcast(pk);
-        ZkRevealStore store = new ZkRevealStore();
+        RevealStore store = new RevealStore();
         vm.stopBroadcast();
 
-        console2.log("ZkRevealStore:", address(store));
+        console2.log("RevealStore:", address(store));
     }
 }

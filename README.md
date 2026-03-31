@@ -1,18 +1,18 @@
-# zkReveal
+# Reveal Protocol
 
-zkReveal is an on-chain encrypted digital delivery escrow primitive.
+Reveal Protocol is an on-chain encrypted digital delivery escrow primitive.
 
 It enables sellers to deliver encrypted access (files, credentials, or content) to buyers using time-bound escrow, where delivery is enforced on-chain and decryption happens off-chain.
 
-This repository contains the v0 smart contract implementation built with Foundry and deployed on Arbitrum Sepolia.
+This repository contains the v0 smart contract implementation for Reveal Protocol, built with Foundry. The current Arbitrum Sepolia deployment predates the rename and still appears under the legacy contract name `ZkRevealStore`.
 
-zkReveal is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
+Reveal Protocol is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
 
-## Why zkReveal
+## Why Reveal Protocol
 
 Most digital commerce today relies on trusted platforms to handle delivery of digital goods.
 
-zkReveal introduces a minimal on-chain primitive for:
+Reveal Protocol introduces a minimal on-chain primitive for:
 - encrypted delivery of digital assets
 - time-bound escrow with automatic refund
 - composable purchase receipts on-chain
@@ -24,7 +24,7 @@ This enables new patterns for:
 
 ## Why Arbitrum
 
-zkReveal benefits from Arbitrum’s:
+Reveal Protocol benefits from Arbitrum’s:
 
 - low transaction costs for frequent escrow creation
 - fast confirmations for buyer-seller interactions
@@ -53,7 +53,7 @@ This flow ensures that payment is conditional on timely delivery, while keeping 
 
 ## Architecture (v0)
 
-zkReveal uses a hierarchical model:
+Reveal Protocol uses a hierarchical model:
 
 - `Listing`: reusable sale entry with human-readable `title`, seller-defined `resourceId`, and per-unit price.
 - `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
@@ -88,7 +88,7 @@ The following data is not stored on-chain:
 
 ## Core Contract
 
-- `src/ZkRevealStore.sol`
+- `src/RevealStore.sol`
 
 Key storage:
 
@@ -269,6 +269,7 @@ Writes:
 ### Arbitrum Sepolia
 
 - Status: Deployed and live on Arbitrum Sepolia
+- Note: this deployment was published before the rename and uses the legacy source-level contract name `ZkRevealStore`
 - Chain ID: 421614
 - Contract: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
 - Transaction: [View on Arbiscan](https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f)

@@ -1,6 +1,6 @@
-# zkReveal Lock Spec (Inventory + Escrow)
+# Reveal Protocol Lock Spec (Inventory + Escrow)
 
-This file freezes the current v0 architecture and naming for `ZkRevealStore`.
+This file freezes the current v0 architecture and naming for `RevealStore`.
 
 ## Locked Model
 

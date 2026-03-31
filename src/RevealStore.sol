@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title ZkRevealStore
+/// @title RevealStore
 /// @notice Inventory-based encrypted delivery escrow for trusted-seller v0.
 /// @dev Sellers create listings, add inventory units, buyers create escrows for listing units, and settlement is escrow-based.
-contract ZkRevealStore is ReentrancyGuard {
+contract RevealStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
 
