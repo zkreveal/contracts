@@ -6,8 +6,7 @@ It enables sellers to deliver encrypted access (files, credentials, or content) 
 
 This repository contains the v0 smart contract implementation built with Foundry and deployed on Arbitrum Sepolia.
 
-zkReveal is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems.
-It focuses purely on enforcement and settlement, leaving validation and UX to integrators.
+zkReveal is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
 
 ## Why zkReveal
 
@@ -271,19 +270,19 @@ Writes:
 
 - Status: Deployed and live on Arbitrum Sepolia
 - Chain ID: 421614
-- Contract: 0x80d0943a39B394e8a5B942c25D90bbB097c762bB
-- Transaction: https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f
+- Contract: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
+- Transaction: [View on Arbiscan](https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f)
 - Block: 254067517
 
 ### Mainnet
 - Planned target: Arbitrum One
 
 ## Setup
-Environment variables:
+This project reads configuration from environment variables.
 
 ```bash
-export DEPLOYER_PRIVATE_KEY="0xx"         
-export RPC_ARB_SEPOLIA="https://sepolia-rollup.arbitrum.io/rpc"
+export DEPLOYER_PRIVATE_KEY="YOUR_PRIVATE_KEY"
+export RPC_ARB_SEPOLIA="YOUR_ARBITRUM_SEPOLIA_RPC_URL"
 ```
 
 ## Development
@@ -292,9 +291,19 @@ export RPC_ARB_SEPOLIA="https://sepolia-rollup.arbitrum.io/rpc"
 forge build
 forge fmt --check
 forge test
+
+forge script script/Deploy.s.sol:Deploy \
+  --rpc-url "$RPC_ARB_SEPOLIA" \
+  --private-key "$DEPLOYER_PRIVATE_KEY" \
+  --broadcast
 ```
 
 ## Additional Docs
 
 - `docs/ENCRYPTION_SPEC_V0.md` — encryption and delivery model
 - `docs/LOCK_SPEC.md` — escrow lifecycle and state transitions
+
+## License
+
+This project is licensed under the Apache-2.0 License.
+See `LICENSE` for details.
