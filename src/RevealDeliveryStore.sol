@@ -3,12 +3,18 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import {FeeMath} from "./FeeMath.sol";
+import {IRakeEngine} from "./IRakeEngine.sol";
+
 /// @title RevealDeliveryStore
 /// @notice Inventory-based encrypted delivery purchases for trusted-seller v0.
 /// @dev Sellers create listings, add inventory units, buyers purchase delivery for listing units, and settlement remains escrow-based internally.
 contract RevealDeliveryStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
+
+    IRakeEngine public immutable rakeEngine;
+    uint16 public immutable maxSettlementFeeBps;
 
     enum EscrowStatus {
         Pending,
@@ -88,6 +94,10 @@ contract RevealDeliveryStore is ReentrancyGuard {
         uint256 indexed escrowId, uint256 indexed listingId, address indexed buyer, string resourceId, string contentCID
     );
 
+    event ProtocolFeePaid(
+        uint256 indexed escrowId, uint256 indexed listingId, address indexed recipient, uint256 amount
+    );
+
     /// @dev Emits canonical escrow/listing identifiers plus non-canonical `resourceId` metadata for off-chain consumers.
     event EscrowReclaimed(
         uint256 indexed escrowId, uint256 indexed listingId, address indexed buyer, string resourceId
@@ -123,6 +133,16 @@ contract RevealDeliveryStore is ReentrancyGuard {
     modifier inventoryUnitExists(uint256 inventoryUnitId) {
         _inventoryUnitExists(inventoryUnitId);
         _;
+    }
+
+    constructor(address rakeEngine_) {
+        if (rakeEngine_ == address(0)) revert InvalidParams();
+        rakeEngine = IRakeEngine(rakeEngine_);
+
+        uint16 settlementFeeCap = rakeEngine.maxProtocolFeeBps();
+        if (settlementFeeCap > FeeMath.BPS_DENOMINATOR) revert InvalidParams();
+
+        maxSettlementFeeBps = settlementFeeCap;
     }
 
     function _listingExists(uint256 listingId) internal view {
@@ -275,17 +295,31 @@ contract RevealDeliveryStore is ReentrancyGuard {
         if (encryptedKey.length == 0) revert EmptyValue();
         if (block.timestamp > escrow.deadline) revert DeadlinePassed();
 
-        InventoryUnit storage inventoryUnit = inventoryUnits[escrow.inventoryUnitId];
-        if (inventoryUnit.listingId != escrow.listingId) revert BadState();
-        if (bytes(inventoryUnit.contentCID).length != 0) revert BadState();
+        {
+            InventoryUnit storage inventoryUnit = inventoryUnits[escrow.inventoryUnitId];
+            if (inventoryUnit.listingId != escrow.listingId) revert BadState();
+            if (bytes(inventoryUnit.contentCID).length != 0) revert BadState();
 
-        inventoryUnit.contentCID = contentCID;
+            inventoryUnit.contentCID = contentCID;
+        }
         escrow.encryptedKey = encryptedKey;
         escrow.status = EscrowStatus.Delivered;
         Listing storage listing = listings[escrow.listingId];
         string memory listingResourceId = listing.resourceId;
 
-        (bool ok,) = escrow.seller.call{value: escrow.amount}("");
+        (address feeRecipient, uint256 protocolFee) =
+            rakeEngine.quoteDeliveryRake(escrow.seller, escrow.listingId, escrow.amount);
+        if (protocolFee > escrow.amount) revert BadState();
+        if (protocolFee > (escrow.amount * maxSettlementFeeBps) / FeeMath.BPS_DENOMINATOR) revert BadState();
+
+        if (protocolFee > 0) {
+            (bool feeOk,) = feeRecipient.call{value: protocolFee}("");
+            if (!feeOk) revert PayFail();
+
+            emit ProtocolFeePaid(escrowId, escrow.listingId, feeRecipient, protocolFee);
+        }
+
+        (bool ok,) = escrow.seller.call{value: escrow.amount - protocolFee}("");
         if (!ok) revert PayFail();
 
         emit EscrowDelivered(escrowId, escrow.listingId, escrow.buyer, listingResourceId, contentCID);
@@ -333,6 +367,20 @@ contract RevealDeliveryStore is ReentrancyGuard {
 
     function isListingSoldOut(uint256 listingId) public view listingExists(listingId) returns (bool) {
         return getListingRemainingInventoryUnits(listingId) == 0;
+    }
+
+    function quotePurchaseDelivery(uint256 listingId)
+        external
+        view
+        listingExists(listingId)
+        returns (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address feeRecipient)
+    {
+        Listing storage listing = listings[listingId];
+        grossAmount = listing.unitPrice;
+        (feeRecipient, protocolFee) = rakeEngine.quoteDeliveryRake(listing.seller, listingId, grossAmount);
+        if (protocolFee > grossAmount) revert BadState();
+        if (protocolFee > (grossAmount * maxSettlementFeeBps) / FeeMath.BPS_DENOMINATOR) revert BadState();
+        sellerNet = grossAmount - protocolFee;
     }
 
     function getListingInventorySummary(uint256 listingId)

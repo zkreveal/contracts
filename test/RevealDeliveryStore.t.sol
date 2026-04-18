@@ -2,15 +2,62 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {RakeEngine} from "../src/RakeEngine.sol";
 import {RevealDeliveryStore} from "../src/RevealDeliveryStore.sol";
 
+contract BadRakeEngineMock {
+    function maxProtocolFeeBps() external pure returns (uint16) {
+        return 10_001;
+    }
+}
+
+contract BadQuoteRakeEngineMock {
+    function maxProtocolFeeBps() external pure returns (uint16) {
+        return 1000;
+    }
+
+    function quoteDeliveryRake(address, uint256, uint256 grossAmount)
+        external
+        pure
+        returns (address recipient, uint256 feeAmount)
+    {
+        recipient = address(0xFEE);
+        feeAmount = grossAmount * 2000 / 10_000;
+    }
+
+    function getEffectiveFeeBps(address, uint256) external pure returns (uint16) {
+        return 2000;
+    }
+}
+
+contract FullAmountQuoteRakeEngineMock {
+    function maxProtocolFeeBps() external pure returns (uint16) {
+        return 1000;
+    }
+
+    function quoteDeliveryRake(address, uint256, uint256 grossAmount)
+        external
+        pure
+        returns (address recipient, uint256 feeAmount)
+    {
+        recipient = address(0xFEE);
+        feeAmount = grossAmount;
+    }
+
+    function getEffectiveFeeBps(address, uint256) external pure returns (uint16) {
+        return 10_000;
+    }
+}
+
 contract RevealDeliveryStoreTest is Test {
+    RakeEngine rakeEngine;
     RevealDeliveryStore store;
 
     address seller = address(0xA11CE);
     address buyer = address(0xB0B);
     address buyer2 = address(0xCAFE);
     address attacker = address(0xD00D);
+    address feeRecipient = address(0xFEE);
 
     string title = "Pro Dataset";
     string resourceId = "dataset/btc-signals-mar-2026";
@@ -20,7 +67,8 @@ contract RevealDeliveryStoreTest is Test {
     bytes buyer2PubKey = hex"05060708";
 
     function setUp() public {
-        store = new RevealDeliveryStore();
+        rakeEngine = new RakeEngine(address(this), feeRecipient, 0);
+        store = new RevealDeliveryStore(address(rakeEngine));
         vm.deal(seller, 10 ether);
         vm.deal(buyer, 10 ether);
         vm.deal(buyer2, 10 ether);
@@ -37,7 +85,10 @@ contract RevealDeliveryStoreTest is Test {
         store.addInventoryUnitsToListing(listingId, count);
     }
 
-    function _purchaseDeliveryAs(uint256 listingId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
+    function _purchaseDeliveryAs(uint256 listingId, address who, bytes memory pubKey)
+        internal
+        returns (uint256 escrowId)
+    {
         vm.prank(who);
         escrowId = store.purchaseDelivery{value: unitPrice}(listingId, pubKey);
     }
@@ -151,6 +202,13 @@ contract RevealDeliveryStoreTest is Test {
         store.createListing(title, resourceId, unitPrice, tooLong);
     }
 
+    function test_Constructor_RevertsWhenRakeEngineReportsCapAboveBpsDenominator() public {
+        BadRakeEngineMock badRakeEngine = new BadRakeEngineMock();
+
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
+        new RevealDeliveryStore(address(badRakeEngine));
+    }
+
     function test_AddInventoryUnitsToListing_AppendsInventory() public {
         uint256 listingId = _createListingAsSeller();
 
@@ -224,6 +282,19 @@ contract RevealDeliveryStoreTest is Test {
 
         uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
+    }
+
+    function test_SetListingActive_EmitsStatusChangedWhenReEnabled() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        store.setListingActive(listingId, false);
+
+        vm.expectEmit(true, false, false, true);
+        emit RevealDeliveryStore.ListingStatusChanged(listingId, true);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, true);
     }
 
     function test_Permissions_NonSellerCannotToggleListingStatus() public {
@@ -377,6 +448,30 @@ contract RevealDeliveryStoreTest is Test {
         assertEq(address(store).balance, 0);
     }
 
+    function test_DeliverEscrow_PaysProtocolFeeAndSellerNet() public {
+        rakeEngine.setDefaultFeeBps(500);
+
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
+
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
+        uint256 sellerBalBefore = seller.balance;
+        uint256 feeRecipientBalBefore = feeRecipient.balance;
+        uint256 protocolFee = unitPrice * 500 / 10_000;
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealDeliveryStore.ProtocolFeePaid(escrowId, listingId, feeRecipient, protocolFee);
+        vm.expectEmit(true, true, true, true);
+        emit RevealDeliveryStore.EscrowDelivered(escrowId, listingId, buyer, resourceId, "ipfs://cid-1");
+
+        vm.prank(seller);
+        store.deliverEscrow(escrowId, "ipfs://cid-1", hex"deadbeef");
+
+        assertEq(feeRecipient.balance, feeRecipientBalBefore + protocolFee);
+        assertEq(seller.balance, sellerBalBefore + (unitPrice - protocolFee));
+        assertEq(address(store).balance, 0);
+    }
+
     function test_DeliverEscrow_AtDeadlineSucceeds() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
@@ -419,6 +514,42 @@ contract RevealDeliveryStoreTest is Test {
         vm.prank(seller);
         vm.expectRevert(RevealDeliveryStore.DeadlinePassed.selector);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
+    }
+
+    function test_DeliverEscrow_RevertsWhenRakeEngineReturnsQuoteAboveSettlementCap() public {
+        BadQuoteRakeEngineMock badQuoteRakeEngine = new BadQuoteRakeEngineMock();
+        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine));
+
+        vm.prank(seller);
+        uint256 listingId = badQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
+
+        vm.prank(seller);
+        badQuoteStore.addInventoryUnitsToListing(listingId, 1);
+
+        vm.prank(buyer);
+        uint256 escrowId = badQuoteStore.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
+        badQuoteStore.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
+    }
+
+    function test_DeliverEscrow_RevertsWhenRakeEngineReturnsFullAmountFee() public {
+        FullAmountQuoteRakeEngineMock fullAmountQuoteRakeEngine = new FullAmountQuoteRakeEngineMock();
+        RevealDeliveryStore fullAmountQuoteStore = new RevealDeliveryStore(address(fullAmountQuoteRakeEngine));
+
+        vm.prank(seller);
+        uint256 listingId = fullAmountQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
+
+        vm.prank(seller);
+        fullAmountQuoteStore.addInventoryUnitsToListing(listingId, 1);
+
+        vm.prank(buyer);
+        uint256 escrowId = fullAmountQuoteStore.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
+        fullAmountQuoteStore.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
     }
 
     function test_Getters_NonexistentIdsRevert() public {
@@ -470,6 +601,24 @@ contract RevealDeliveryStoreTest is Test {
         assertEq(inventoryUnit.contentCID, "");
         assertEq(inventoryUnit.consumed, true);
         assertEq(store.getListingRemainingInventoryUnits(listingId), 0);
+    }
+
+    function test_ReclaimEscrow_DoesNotPayProtocolFee() public {
+        rakeEngine.setDefaultFeeBps(500);
+
+        uint256 listingId = _createListingAsSeller();
+        _addInventoryUnitsAsSeller(listingId, 1);
+
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
+        uint256 feeRecipientBalBefore = feeRecipient.balance;
+
+        uint64 deadline = store.getEscrow(escrowId).deadline;
+        vm.warp(uint256(deadline) + 1);
+
+        vm.prank(buyer);
+        store.reclaimEscrow(escrowId);
+
+        assertEq(feeRecipient.balance, feeRecipientBalBefore);
     }
 
     function test_ReclaimEscrow_BeforeDeadlineReverts() public {
@@ -530,5 +679,30 @@ contract RevealDeliveryStoreTest is Test {
 
         _assertInventory(listingId, 2, 2, 0, true);
         assertEq(store.isListingSoldOut(listingId), true);
+    }
+
+    function test_QuotePurchaseDelivery_ReturnsGrossFeeAndNet() public {
+        rakeEngine.setDefaultFeeBps(500);
+
+        uint256 listingId = _createListingAsSeller();
+
+        (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient) =
+            store.quotePurchaseDelivery(listingId);
+
+        assertEq(grossAmount, unitPrice);
+        assertEq(protocolFee, unitPrice * 500 / 10_000);
+        assertEq(sellerNet, unitPrice - protocolFee);
+        assertEq(quotedFeeRecipient, feeRecipient);
+    }
+
+    function test_QuotePurchaseDelivery_RevertsWhenRakeEngineReturnsQuoteAboveSettlementCap() public {
+        BadQuoteRakeEngineMock badQuoteRakeEngine = new BadQuoteRakeEngineMock();
+        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine));
+
+        vm.prank(seller);
+        uint256 listingId = badQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
+
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
+        badQuoteStore.quotePurchaseDelivery(listingId);
     }
 }
