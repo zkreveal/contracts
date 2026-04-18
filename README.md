@@ -4,7 +4,7 @@ Reveal Protocol is an on-chain encrypted digital delivery escrow primitive.
 
 It enables sellers to deliver encrypted access (files, credentials, or content) to buyers using time-bound escrow, where delivery is enforced on-chain and decryption happens off-chain.
 
-This repository contains the v0 smart contract implementation for Reveal Protocol, built with Foundry. The current Arbitrum Sepolia deployment predates the rename and still appears under the legacy contract name `ZkRevealStore`.
+This repository contains the v0 smart contract implementation for Reveal Protocol, built with Foundry. The current source-level contract name is `RevealDeliveryStore`, while the Arbitrum Sepolia deployment predates this rename and still appears under the legacy contract name `ZkRevealStore`.
 
 Reveal Protocol is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
 
@@ -26,7 +26,7 @@ This enables new patterns for:
 
 Reveal Protocol benefits from Arbitrum’s:
 
-- low transaction costs for frequent escrow creation
+- low transaction costs for frequent delivery purchases
 - fast confirmations for buyer-seller interactions
 - strong EVM compatibility and tooling
 - suitability for building higher-level protocols on top
@@ -42,7 +42,7 @@ Arbitrum provides a practical base layer for scaling encrypted delivery primitiv
 
 Seller creates listing
 → Adds inventory units
-→ Buyer opens escrow with public key
+→ Buyer purchases delivery with public key
 → Seller delivers encrypted payload + CID before deadline
 
 Outcome:
@@ -88,7 +88,7 @@ The following data is not stored on-chain:
 
 ## Core Contract
 
-- `src/RevealStore.sol`
+- `src/RevealDeliveryStore.sol`
 
 Key storage:
 
@@ -126,14 +126,14 @@ Each escrow can be treated as an on-chain purchase receipt. A delivered escrow i
 
 1. Create listing via `createListing(title, resourceId, unitPrice, refundWindow)`.
 2. Add inventory units via `addInventoryUnitsToListing(listingId, count)`.
-3. Buyer creates escrow via `createEscrow`.
+3. Buyer purchases delivery via `purchaseDelivery`.
 4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
 5. Contract pays seller immediately on successful delivery submission.
 
 ### Buyer flow
 
 1. Generate buyer encryption keypair off-chain.
-2. Call `createEscrow(listingId, buyerPubKey)` and pay exact `unitPrice`.
+2. Call `purchaseDelivery(listingId, buyerPubKey)` and pay exact `unitPrice`.
 3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
 4. Read the delivered `contentCID` from the allocated inventory unit via `getInventoryUnit(escrow.inventoryUnitId)`.
 5. Decrypt content key off-chain and use the delivered `contentCID`.
@@ -192,7 +192,7 @@ Writes:
 
 - listing availability flag
 
-### `createEscrow(uint256 listingId, bytes buyerPubKey) payable`
+### `purchaseDelivery(uint256 listingId, bytes buyerPubKey) payable`
 
 Inputs:
 

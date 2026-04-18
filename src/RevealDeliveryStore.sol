@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title RevealStore
-/// @notice Inventory-based encrypted delivery escrow for trusted-seller v0.
-/// @dev Sellers create listings, add inventory units, buyers create escrows for listing units, and settlement is escrow-based.
-contract RevealStore is ReentrancyGuard {
+/// @title RevealDeliveryStore
+/// @notice Inventory-based encrypted delivery purchases for trusted-seller v0.
+/// @dev Sellers create listings, add inventory units, buyers purchase delivery for listing units, and settlement remains escrow-based internally.
+contract RevealDeliveryStore is ReentrancyGuard {
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
 
@@ -223,7 +223,9 @@ contract RevealStore is ReentrancyGuard {
         listing.soldInventoryUnits += 1;
     }
 
-    function createEscrow(uint256 listingId, bytes calldata buyerPubKey)
+    /// @notice Purchase one listing unit through delivery mode using a buyer encryption public key.
+    /// @dev Internally this allocates inventory and creates escrow state for delivery and refund handling.
+    function purchaseDelivery(uint256 listingId, bytes calldata buyerPubKey)
         external
         payable
         listingExists(listingId)

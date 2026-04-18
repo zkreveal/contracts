@@ -51,11 +51,11 @@ Owns the digital good and prepares encrypted inventory.
 
 ### Buyer
 
-Provides a public encryption key during escrow creation and later decrypts the delivered content.
+Provides a public encryption key during purchase and later decrypts the delivered content.
 
-### RevealStore Contract
+### RevealDeliveryStore Contract
 
-The `RevealStore` contract stores escrow state and buyer-specific encrypted delivery material. It does not decrypt or inspect the payload.
+The `RevealDeliveryStore` contract stores escrow state and buyer-specific encrypted delivery material. It does not decrypt or inspect the payload.
 
 ---
 
@@ -141,7 +141,7 @@ In the current v0 contract model, `contentCID` is not written onchain at listing
 
 ### 6.2 Purchase by Buyer
 
-When creating escrow, the buyer submits:
+When purchasing delivery, the buyer submits:
 
 - `buyerEncryptionPubKey`
 
@@ -151,7 +151,7 @@ It should be treated as distinct from the buyer’s wallet signing key unless th
 
 Protocol requirement at the contract boundary:
 
-- `buyerPubKey` passed to `createEscrow(...)` must be exactly 32 raw X25519 public-key bytes
+- `buyerPubKey` passed to `purchaseDelivery(...)` must be exactly 32 raw X25519 public-key bytes
 - base64 is acceptable only in JSON or HTTP transport before contract submission
 - app-layer code must decode and validate the key before calling the contract
 
@@ -237,7 +237,7 @@ This object is stored offchain and referenced by `contentCID`.
 - the outer JSON shape is stable for v0
 - future versions may add extra metadata fields under a new `version`
 
-### 7.3 Buyer Escrow Input
+### 7.3 Buyer Purchase Input
 
 App-layer JSON example:
 
@@ -253,7 +253,7 @@ App-layer JSON example:
 
 Canonical onchain encoding:
 
-- `buyerPubKey` in `createEscrow(listingId, buyerPubKey)` is exactly 32 raw bytes
+- `buyerPubKey` in `purchaseDelivery(listingId, buyerPubKey)` is exactly 32 raw bytes
 - callers must not send base64 text bytes to the contract
 - because the v0 contract only checks `buyerPubKey.length > 0`, compliant apps must enforce the 32-byte rule offchain
 
@@ -327,7 +327,7 @@ A conforming Reveal Protocol v0 seller implementation must:
 A conforming Reveal Protocol v0 buyer implementation must:
 
 1. generate or provide a valid encryption keypair
-2. submit the public encryption key during escrow creation
+2. submit the public encryption key during purchase
 3. retain the private key securely
 4. use the private key to recover `contentKey`
 5. use recovered `contentKey` to decrypt the payload envelope

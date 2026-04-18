@@ -1,6 +1,6 @@
 # Reveal Protocol Lock Spec (Inventory + Escrow)
 
-This file freezes the current v0 architecture and naming for `RevealStore`.
+This file freezes the current v0 architecture and naming for `RevealDeliveryStore`.
 
 ## Locked Model
 
@@ -48,7 +48,7 @@ ID counters:
 `Listing.unitPrice` is per-unit price.  
 `Listing.totalInventoryUnits` counts all units ever added.  
 `Listing.soldInventoryUnits` counts all allocated/consumed units.  
-`Listing.active` gates new escrow creation only.
+`Listing.active` gates new delivery purchases only.
 
 ## Integration Safety
 
@@ -135,7 +135,7 @@ Emits:
 
 - `ListingStatusChanged`
 
-### `createEscrow(listingId, buyerPubKey) payable -> escrowId`
+### `purchaseDelivery(listingId, buyerPubKey) payable -> escrowId`
 
 Inputs:
 

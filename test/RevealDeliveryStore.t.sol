@@ -2,10 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {RevealStore} from "../src/RevealStore.sol";
+import {RevealDeliveryStore} from "../src/RevealDeliveryStore.sol";
 
-contract RevealStoreTest is Test {
-    RevealStore store;
+contract RevealDeliveryStoreTest is Test {
+    RevealDeliveryStore store;
 
     address seller = address(0xA11CE);
     address buyer = address(0xB0B);
@@ -20,7 +20,7 @@ contract RevealStoreTest is Test {
     bytes buyer2PubKey = hex"05060708";
 
     function setUp() public {
-        store = new RevealStore();
+        store = new RevealDeliveryStore();
         vm.deal(seller, 10 ether);
         vm.deal(buyer, 10 ether);
         vm.deal(buyer2, 10 ether);
@@ -37,9 +37,9 @@ contract RevealStoreTest is Test {
         store.addInventoryUnitsToListing(listingId, count);
     }
 
-    function _createEscrowAs(uint256 listingId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
+    function _purchaseDeliveryAs(uint256 listingId, address who, bytes memory pubKey) internal returns (uint256 escrowId) {
         vm.prank(who);
-        escrowId = store.createEscrow{value: unitPrice}(listingId, pubKey);
+        escrowId = store.purchaseDelivery{value: unitPrice}(listingId, pubKey);
     }
 
     function _assertInventory(
@@ -59,7 +59,7 @@ contract RevealStoreTest is Test {
 
     function test_ListingCreated_Emits() public {
         vm.expectEmit(true, true, false, true);
-        emit RevealStore.ListingCreated(1, seller, title, resourceId, unitPrice, refundWindow);
+        emit RevealDeliveryStore.ListingCreated(1, seller, title, resourceId, unitPrice, refundWindow);
 
         vm.prank(seller);
         store.createListing(title, resourceId, unitPrice, refundWindow);
@@ -68,7 +68,7 @@ contract RevealStoreTest is Test {
     function test_CreateListing_SetsFields() public {
         uint256 listingId = _createListingAsSeller();
 
-        RevealStore.Listing memory listing = store.getListing(listingId);
+        RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.seller, seller);
         assertEq(listing.title, title);
         assertEq(listing.resourceId, resourceId);
@@ -119,7 +119,7 @@ contract RevealStoreTest is Test {
         vm.prank(seller);
         uint256 listingId = store.createListing(title, "   ", unitPrice, refundWindow);
 
-        RevealStore.Listing memory listing = store.getListing(listingId);
+        RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.resourceId, "   ");
 
         (,, string memory listingResourceId,,,,,,) = store.listings(listingId);
@@ -131,23 +131,23 @@ contract RevealStoreTest is Test {
         uint64 tooLong = store.MAX_REFUND_WINDOW() + 1;
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.createListing("", resourceId, unitPrice, refundWindow);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.createListing(title, "", unitPrice, refundWindow);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.createListing(title, resourceId, 0, refundWindow);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.createListing(title, resourceId, unitPrice, tooShort);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.createListing(title, resourceId, unitPrice, tooLong);
     }
 
@@ -155,20 +155,20 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
 
         vm.expectEmit(true, false, false, true);
-        emit RevealStore.InventoryUnitAdded(listingId, 3);
+        emit RevealDeliveryStore.InventoryUnitAdded(listingId, 3);
 
         _addInventoryUnitsAsSeller(listingId, 3);
 
         uint256[] memory inventoryUnitIds = store.getListingInventoryUnitIds(listingId);
         assertEq(inventoryUnitIds.length, 3);
 
-        RevealStore.Listing memory listing = store.getListing(listingId);
+        RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.totalInventoryUnits, 3);
         assertEq(listing.soldInventoryUnits, 0);
 
-        RevealStore.InventoryUnit memory inventoryUnit0 = store.getInventoryUnit(inventoryUnitIds[0]);
-        RevealStore.InventoryUnit memory inventoryUnit1 = store.getInventoryUnit(inventoryUnitIds[1]);
-        RevealStore.InventoryUnit memory inventoryUnit2 = store.getInventoryUnit(inventoryUnitIds[2]);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit0 = store.getInventoryUnit(inventoryUnitIds[0]);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit1 = store.getInventoryUnit(inventoryUnitIds[1]);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit2 = store.getInventoryUnit(inventoryUnitIds[2]);
 
         assertEq(inventoryUnit0.listingId, listingId);
         assertEq(inventoryUnit0.contentCID, "");
@@ -187,13 +187,13 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
         store.addInventoryUnitsToListing(listingId, 0);
     }
 
     function test_AddInventoryUnitsToListing_NonexistentListingReverts() public {
         vm.prank(seller);
-        vm.expectRevert(RevealStore.ListingNotFound.selector);
+        vm.expectRevert(RevealDeliveryStore.ListingNotFound.selector);
         store.addInventoryUnitsToListing(999, 1);
     }
 
@@ -201,28 +201,28 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
 
         vm.prank(attacker);
-        vm.expectRevert(RevealStore.NotListingSeller.selector);
+        vm.expectRevert(RevealDeliveryStore.NotListingSeller.selector);
         store.addInventoryUnitsToListing(listingId, 1);
     }
 
-    function test_SetListingActive_TogglesAndBlocksEscrowCreation() public {
+    function test_SetListingActive_TogglesAndBlocksPurchases() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.expectEmit(true, false, false, true);
-        emit RevealStore.ListingStatusChanged(listingId, false);
+        emit RevealDeliveryStore.ListingStatusChanged(listingId, false);
 
         vm.prank(seller);
         store.setListingActive(listingId, false);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.ListingInactive.selector);
-        store.createEscrow{value: unitPrice}(listingId, buyerPubKey);
+        vm.expectRevert(RevealDeliveryStore.ListingInactive.selector);
+        store.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
 
         vm.prank(seller);
         store.setListingActive(listingId, true);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
     }
 
@@ -230,104 +230,104 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
 
         vm.prank(attacker);
-        vm.expectRevert(RevealStore.NotListingSeller.selector);
+        vm.expectRevert(RevealDeliveryStore.NotListingSeller.selector);
         store.setListingActive(listingId, false);
     }
 
-    function test_CreateEscrow_AllocatesAndCreatesEscrow() public {
+    function test_PurchaseDelivery_AllocatesAndCreatesEscrow() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 2);
 
         uint256 buyerBalBefore = buyer.balance;
 
         vm.expectEmit(true, true, true, true);
-        emit RevealStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice, resourceId);
+        emit RevealDeliveryStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice, resourceId);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         assertEq(escrowId, 1);
 
-        RevealStore.Escrow memory escrow = store.getEscrow(escrowId);
+        RevealDeliveryStore.Escrow memory escrow = store.getEscrow(escrowId);
         assertEq(escrow.listingId, listingId);
         assertEq(escrow.inventoryUnitId, 1);
         assertEq(escrow.seller, seller);
         assertEq(escrow.buyer, buyer);
         assertEq(escrow.amount, unitPrice);
         assertEq(escrow.buyerPubKey, buyerPubKey);
-        assertEq(uint8(escrow.status), uint8(RevealStore.EscrowStatus.Pending));
+        assertEq(uint8(escrow.status), uint8(RevealDeliveryStore.EscrowStatus.Pending));
         assertEq(escrow.deadline, escrow.createdAt + refundWindow);
 
-        RevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(1);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(1);
         assertEq(inventoryUnit.contentCID, "");
         assertEq(inventoryUnit.consumed, true);
 
         assertEq(buyer.balance, buyerBalBefore - unitPrice);
         assertEq(address(store).balance, unitPrice);
 
-        RevealStore.Listing memory listing = store.getListing(listingId);
+        RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.soldInventoryUnits, 1);
         assertEq(listing.nextInventoryUnitIndex, 1);
         assertEq(store.getListingRemainingInventoryUnits(listingId), 1);
     }
 
-    function test_CreateEscrow_SequentialAllocation() public {
+    function test_PurchaseDelivery_SequentialAllocation() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 3);
 
-        uint256 escrowId1 = _createEscrowAs(listingId, buyer, buyerPubKey);
-        uint256 escrowId2 = _createEscrowAs(listingId, buyer2, buyer2PubKey);
+        uint256 escrowId1 = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId2 = _purchaseDeliveryAs(listingId, buyer2, buyer2PubKey);
 
         assertEq(store.getEscrow(escrowId1).inventoryUnitId, 1);
         assertEq(store.getEscrow(escrowId2).inventoryUnitId, 2);
 
-        RevealStore.Listing memory listing = store.getListing(listingId);
+        RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.soldInventoryUnits, 2);
         assertEq(listing.nextInventoryUnitIndex, 2);
         assertEq(store.getListingRemainingInventoryUnits(listingId), 1);
     }
 
-    function test_CreateEscrow_SoldOutReverts() public {
+    function test_PurchaseDelivery_SoldOutReverts() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        _createEscrowAs(listingId, buyer, buyerPubKey);
+        _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(buyer2);
-        vm.expectRevert(RevealStore.SoldOut.selector);
-        store.createEscrow{value: unitPrice}(listingId, buyer2PubKey);
+        vm.expectRevert(RevealDeliveryStore.SoldOut.selector);
+        store.purchaseDelivery{value: unitPrice}(listingId, buyer2PubKey);
     }
 
-    function test_CreateEscrow_BadPriceReverts() public {
+    function test_PurchaseDelivery_BadPriceReverts() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.BadPrice.selector);
-        store.createEscrow{value: unitPrice - 1}(listingId, buyerPubKey);
+        vm.expectRevert(RevealDeliveryStore.BadPrice.selector);
+        store.purchaseDelivery{value: unitPrice - 1}(listingId, buyerPubKey);
     }
 
-    function test_CreateEscrow_EmptyPubKeyReverts() public {
+    function test_PurchaseDelivery_EmptyPubKeyReverts() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.InvalidParams.selector);
-        store.createEscrow{value: unitPrice}(listingId, "");
+        vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
+        store.purchaseDelivery{value: unitPrice}(listingId, "");
     }
 
-    function test_CreateEscrow_NonexistentListingReverts() public {
+    function test_PurchaseDelivery_NonexistentListingReverts() public {
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.ListingNotFound.selector);
-        store.createEscrow{value: unitPrice}(999, buyerPubKey);
+        vm.expectRevert(RevealDeliveryStore.ListingNotFound.selector);
+        store.purchaseDelivery{value: unitPrice}(999, buyerPubKey);
     }
 
     function test_Permissions_NonSellerCannotDeliverEscrow() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(attacker);
-        vm.expectRevert(RevealStore.NotEscrowSeller.selector);
+        vm.expectRevert(RevealDeliveryStore.NotEscrowSeller.selector);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
     }
 
@@ -335,10 +335,10 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.EmptyValue.selector);
+        vm.expectRevert(RevealDeliveryStore.EmptyValue.selector);
         store.deliverEscrow(escrowId, "ipfs://cid-1", "");
     }
 
@@ -346,10 +346,10 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.EmptyValue.selector);
+        vm.expectRevert(RevealDeliveryStore.EmptyValue.selector);
         store.deliverEscrow(escrowId, "", hex"aa");
     }
 
@@ -357,20 +357,20 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         uint256 sellerBalBefore = seller.balance;
 
         vm.expectEmit(true, true, true, true);
-        emit RevealStore.EscrowDelivered(escrowId, listingId, buyer, resourceId, "ipfs://cid-1");
+        emit RevealDeliveryStore.EscrowDelivered(escrowId, listingId, buyer, resourceId, "ipfs://cid-1");
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"deadbeef");
 
-        RevealStore.Escrow memory escrow = store.getEscrow(escrowId);
-        assertEq(uint8(escrow.status), uint8(RevealStore.EscrowStatus.Delivered));
+        RevealDeliveryStore.Escrow memory escrow = store.getEscrow(escrowId);
+        assertEq(uint8(escrow.status), uint8(RevealDeliveryStore.EscrowStatus.Delivered));
         assertEq(escrow.encryptedKey, hex"deadbeef");
 
-        RevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
         assertEq(inventoryUnit.contentCID, "ipfs://cid-1");
 
         assertEq(seller.balance, sellerBalBefore + unitPrice);
@@ -381,7 +381,7 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
 
         vm.warp(uint256(deadline));
@@ -389,7 +389,7 @@ contract RevealStoreTest is Test {
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
-        assertEq(uint8(store.getEscrow(escrowId).status), uint8(RevealStore.EscrowStatus.Delivered));
+        assertEq(uint8(store.getEscrow(escrowId).status), uint8(RevealDeliveryStore.EscrowStatus.Delivered));
         assertEq(store.getInventoryUnit(store.getEscrow(escrowId).inventoryUnitId).contentCID, "ipfs://cid-1");
     }
 
@@ -397,13 +397,13 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.BadState.selector);
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
         store.deliverEscrow(escrowId, "ipfs://cid-2", hex"bb");
     }
 
@@ -411,24 +411,24 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
         vm.prank(seller);
-        vm.expectRevert(RevealStore.DeadlinePassed.selector);
+        vm.expectRevert(RevealDeliveryStore.DeadlinePassed.selector);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
     }
 
     function test_Getters_NonexistentIdsRevert() public {
-        vm.expectRevert(RevealStore.ListingNotFound.selector);
+        vm.expectRevert(RevealDeliveryStore.ListingNotFound.selector);
         store.getListing(999);
 
-        vm.expectRevert(RevealStore.InventoryUnitNotFound.selector);
+        vm.expectRevert(RevealDeliveryStore.InventoryUnitNotFound.selector);
         store.getInventoryUnit(999);
 
-        vm.expectRevert(RevealStore.EscrowNotFound.selector);
+        vm.expectRevert(RevealDeliveryStore.EscrowNotFound.selector);
         store.getEscrow(999);
     }
 
@@ -436,12 +436,12 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
         vm.prank(attacker);
-        vm.expectRevert(RevealStore.NotEscrowBuyer.selector);
+        vm.expectRevert(RevealDeliveryStore.NotEscrowBuyer.selector);
         store.reclaimEscrow(escrowId);
     }
 
@@ -450,23 +450,23 @@ contract RevealStoreTest is Test {
         _addInventoryUnitsAsSeller(listingId, 1);
 
         uint256 buyerBalBefore = buyer.balance;
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
 
         vm.expectEmit(true, true, true, true);
-        emit RevealStore.EscrowReclaimed(escrowId, listingId, buyer, resourceId);
+        emit RevealDeliveryStore.EscrowReclaimed(escrowId, listingId, buyer, resourceId);
 
         vm.prank(buyer);
         store.reclaimEscrow(escrowId);
 
-        RevealStore.Escrow memory escrow = store.getEscrow(escrowId);
-        assertEq(uint8(escrow.status), uint8(RevealStore.EscrowStatus.Reclaimed));
+        RevealDeliveryStore.Escrow memory escrow = store.getEscrow(escrowId);
+        assertEq(uint8(escrow.status), uint8(RevealDeliveryStore.EscrowStatus.Reclaimed));
         assertEq(buyer.balance, buyerBalBefore);
 
         // Consumed inventory stays consumed (no recycle)
-        RevealStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
+        RevealDeliveryStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
         assertEq(inventoryUnit.contentCID, "");
         assertEq(inventoryUnit.consumed, true);
         assertEq(store.getListingRemainingInventoryUnits(listingId), 0);
@@ -476,10 +476,10 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.DeadlineNotPassed.selector);
+        vm.expectRevert(RevealDeliveryStore.DeadlineNotPassed.selector);
         store.reclaimEscrow(escrowId);
     }
 
@@ -487,7 +487,7 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
@@ -496,7 +496,7 @@ contract RevealStoreTest is Test {
         store.reclaimEscrow(escrowId);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.BadState.selector);
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
         store.reclaimEscrow(escrowId);
     }
 
@@ -504,7 +504,7 @@ contract RevealStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 escrowId = _createEscrowAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"aa");
@@ -512,7 +512,7 @@ contract RevealStoreTest is Test {
         vm.warp(uint256(store.getEscrow(escrowId).deadline) + 1);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealStore.BadState.selector);
+        vm.expectRevert(RevealDeliveryStore.BadState.selector);
         store.reclaimEscrow(escrowId);
     }
 
@@ -522,11 +522,11 @@ contract RevealStoreTest is Test {
 
         _assertInventory(listingId, 2, 0, 2, false);
 
-        _createEscrowAs(listingId, buyer, buyerPubKey);
+        _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         _assertInventory(listingId, 2, 1, 1, false);
 
-        _createEscrowAs(listingId, buyer2, buyer2PubKey);
+        _purchaseDeliveryAs(listingId, buyer2, buyer2PubKey);
 
         _assertInventory(listingId, 2, 2, 0, true);
         assertEq(store.isListingSoldOut(listingId), true);
