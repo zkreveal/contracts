@@ -10,13 +10,15 @@ contract Deploy is Script {
     function run() external {
         uint256 pk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(pk);
+        address settlementToken = vm.envAddress("SETTLEMENT_TOKEN");
 
         console2.log("Deployer:", deployer);
         console2.log("ChainId:", block.chainid);
+        console2.log("SettlementToken:", settlementToken);
 
         vm.startBroadcast(pk);
         RakeEngine rakeEngine = new RakeEngine(deployer, deployer, 0);
-        RevealDeliveryStore store = new RevealDeliveryStore(address(rakeEngine));
+        RevealDeliveryStore store = new RevealDeliveryStore(address(rakeEngine), settlementToken);
         vm.stopBroadcast();
 
         console2.log("RakeEngine:", address(rakeEngine));

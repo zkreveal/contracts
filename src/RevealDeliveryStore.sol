@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {FeeMath} from "./FeeMath.sol";
 import {IRakeEngine} from "./IRakeEngine.sol";
 
 /// @title RevealDeliveryStore
-/// @notice Inventory-based encrypted delivery purchases for trusted-seller v0.
-/// @dev Sellers create listings, add inventory units, buyers purchase delivery for listing units, and settlement remains escrow-based internally.
+/// @notice Inventory-based encrypted delivery purchases settled in a single ERC-20 token.
+/// @dev Sellers create listings, add inventory units, buyers escrow settlement token base units, and settlement remains escrow-based internally.
 contract RevealDeliveryStore is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     uint64 public constant MIN_REFUND_WINDOW = 5 minutes;
     uint64 public constant MAX_REFUND_WINDOW = 30 days;
 
     IRakeEngine public immutable rakeEngine;
+    IERC20 public immutable settlementToken;
     uint16 public immutable maxSettlementFeeBps;
 
     enum EscrowStatus {
@@ -112,13 +117,10 @@ contract RevealDeliveryStore is ReentrancyGuard {
     error ListingInactive();
     error SoldOut();
     error BadState();
-    error BadPrice();
     error InvalidParams();
     error DeadlineNotPassed();
     error DeadlinePassed();
     error EmptyValue();
-    error PayFail();
-    error RefundFail();
 
     modifier listingExists(uint256 listingId) {
         _listingExists(listingId);
@@ -135,9 +137,11 @@ contract RevealDeliveryStore is ReentrancyGuard {
         _;
     }
 
-    constructor(address rakeEngine_) {
+    constructor(address rakeEngine_, address settlementToken_) {
         if (rakeEngine_ == address(0)) revert InvalidParams();
+        if (settlementToken_ == address(0)) revert InvalidParams();
         rakeEngine = IRakeEngine(rakeEngine_);
+        settlementToken = IERC20(settlementToken_);
 
         uint16 settlementFeeCap = rakeEngine.maxProtocolFeeBps();
         if (settlementFeeCap > FeeMath.BPS_DENOMINATOR) revert InvalidParams();
@@ -170,6 +174,7 @@ contract RevealDeliveryStore is ReentrancyGuard {
     }
 
     /// @notice Create a seller-owned listing with a human-readable title and seller-defined semantic resource identifier.
+    /// @dev `unitPrice` is denominated in settlement token base units.
     /// @dev `listingId` remains the canonical on-chain identifier; `resourceId` is a non-unique, non-normalized off-chain hint.
     function createListing(string calldata title, string calldata resourceId, uint256 unitPrice, uint64 refundWindow)
         external
@@ -244,10 +249,10 @@ contract RevealDeliveryStore is ReentrancyGuard {
     }
 
     /// @notice Purchase one listing unit through delivery mode using a buyer encryption public key.
-    /// @dev Internally this allocates inventory and creates escrow state for delivery and refund handling.
+    /// @dev Internally this pulls settlement tokens, allocates inventory, and creates escrow state for delivery and refund handling.
     function purchaseDelivery(uint256 listingId, bytes calldata buyerPubKey)
         external
-        payable
+        nonReentrant
         listingExists(listingId)
         returns (uint256 escrowId)
     {
@@ -255,7 +260,8 @@ contract RevealDeliveryStore is ReentrancyGuard {
 
         if (!listing.active) revert ListingInactive();
         if (buyerPubKey.length == 0) revert InvalidParams();
-        if (msg.value != listing.unitPrice) revert BadPrice();
+
+        settlementToken.safeTransferFrom(msg.sender, address(this), listing.unitPrice);
 
         uint256 inventoryUnitId = _allocateNextInventoryUnit(listingId);
 
@@ -279,7 +285,7 @@ contract RevealDeliveryStore is ReentrancyGuard {
         );
     }
 
-    /// @notice Seller posts a content CID and encrypted delivery payload, then receives escrowed funds.
+    /// @notice Seller posts a content CID and encrypted delivery payload, then receives escrowed settlement tokens.
     /// @dev v0 only checks that both values are non-empty and submitted on or before the deadline.
     ///      Payload correctness and buyer-side decryptability are verified off-chain.
     function deliverEscrow(uint256 escrowId, string calldata contentCID, bytes calldata encryptedKey)
@@ -313,14 +319,11 @@ contract RevealDeliveryStore is ReentrancyGuard {
         if (protocolFee > (escrow.amount * maxSettlementFeeBps) / FeeMath.BPS_DENOMINATOR) revert BadState();
 
         if (protocolFee > 0) {
-            (bool feeOk,) = feeRecipient.call{value: protocolFee}("");
-            if (!feeOk) revert PayFail();
-
+            settlementToken.safeTransfer(feeRecipient, protocolFee);
             emit ProtocolFeePaid(escrowId, escrow.listingId, feeRecipient, protocolFee);
         }
 
-        (bool ok,) = escrow.seller.call{value: escrow.amount - protocolFee}("");
-        if (!ok) revert PayFail();
+        settlementToken.safeTransfer(escrow.seller, escrow.amount - protocolFee);
 
         emit EscrowDelivered(escrowId, escrow.listingId, escrow.buyer, listingResourceId, contentCID);
     }
@@ -336,8 +339,7 @@ contract RevealDeliveryStore is ReentrancyGuard {
         Listing storage listing = listings[escrow.listingId];
         string memory listingResourceId = listing.resourceId;
 
-        (bool ok,) = escrow.buyer.call{value: escrow.amount}("");
-        if (!ok) revert RefundFail();
+        settlementToken.safeTransfer(escrow.buyer, escrow.amount);
 
         emit EscrowReclaimed(escrowId, escrow.listingId, escrow.buyer, listingResourceId);
     }

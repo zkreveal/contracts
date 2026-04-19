@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Test} from "forge-std/Test.sol";
 import {RakeEngine} from "../src/RakeEngine.sol";
 import {RevealDeliveryStore} from "../src/RevealDeliveryStore.sol";
+
+contract MockUSDC is ERC20 {
+    constructor() ERC20("Mock USDC", "USDC") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
 
 contract BadRakeEngineMock {
     function maxProtocolFeeBps() external pure returns (uint16) {
@@ -50,6 +63,7 @@ contract FullAmountQuoteRakeEngineMock {
 }
 
 contract RevealDeliveryStoreTest is Test {
+    MockUSDC usdc;
     RakeEngine rakeEngine;
     RevealDeliveryStore store;
 
@@ -61,14 +75,18 @@ contract RevealDeliveryStoreTest is Test {
 
     string title = "Pro Dataset";
     string resourceId = "dataset/btc-signals-mar-2026";
-    uint256 unitPrice = 0.1 ether;
+    uint256 unitPrice = 100_000_000;
     uint64 refundWindow = 1 hours;
     bytes buyerPubKey = hex"01020304";
     bytes buyer2PubKey = hex"05060708";
 
     function setUp() public {
+        usdc = new MockUSDC();
         rakeEngine = new RakeEngine(address(this), feeRecipient, 0);
-        store = new RevealDeliveryStore(address(rakeEngine));
+        store = new RevealDeliveryStore(address(rakeEngine), address(usdc));
+        usdc.mint(buyer, 1_000_000_000);
+        usdc.mint(buyer2, 1_000_000_000);
+        usdc.mint(attacker, 1_000_000_000);
         vm.deal(seller, 10 ether);
         vm.deal(buyer, 10 ether);
         vm.deal(buyer2, 10 ether);
@@ -85,12 +103,21 @@ contract RevealDeliveryStoreTest is Test {
         store.addInventoryUnitsToListing(listingId, count);
     }
 
+    function _purchaseDeliveryAs(RevealDeliveryStore targetStore, uint256 listingId, address who, bytes memory pubKey)
+        internal
+        returns (uint256 escrowId)
+    {
+        vm.startPrank(who);
+        usdc.approve(address(targetStore), unitPrice);
+        escrowId = targetStore.purchaseDelivery(listingId, pubKey);
+        vm.stopPrank();
+    }
+
     function _purchaseDeliveryAs(uint256 listingId, address who, bytes memory pubKey)
         internal
         returns (uint256 escrowId)
     {
-        vm.prank(who);
-        escrowId = store.purchaseDelivery{value: unitPrice}(listingId, pubKey);
+        escrowId = _purchaseDeliveryAs(store, listingId, who, pubKey);
     }
 
     function _assertInventory(
@@ -206,7 +233,7 @@ contract RevealDeliveryStoreTest is Test {
         BadRakeEngineMock badRakeEngine = new BadRakeEngineMock();
 
         vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
-        new RevealDeliveryStore(address(badRakeEngine));
+        new RevealDeliveryStore(address(badRakeEngine), address(usdc));
     }
 
     function test_AddInventoryUnitsToListing_AppendsInventory() public {
@@ -275,7 +302,7 @@ contract RevealDeliveryStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(RevealDeliveryStore.ListingInactive.selector);
-        store.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
+        store.purchaseDelivery(listingId, buyerPubKey);
 
         vm.prank(seller);
         store.setListingActive(listingId, true);
@@ -309,12 +336,16 @@ contract RevealDeliveryStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 2);
 
-        uint256 buyerBalBefore = buyer.balance;
+        uint256 buyerBalBefore = usdc.balanceOf(buyer);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
 
         vm.expectEmit(true, true, true, true);
         emit RevealDeliveryStore.EscrowCreated(1, listingId, 1, seller, buyer, unitPrice, resourceId);
 
-        uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
+        uint256 escrowId = store.purchaseDelivery(listingId, buyerPubKey);
+        vm.stopPrank();
         assertEq(escrowId, 1);
 
         RevealDeliveryStore.Escrow memory escrow = store.getEscrow(escrowId);
@@ -331,8 +362,8 @@ contract RevealDeliveryStoreTest is Test {
         assertEq(inventoryUnit.contentCID, "");
         assertEq(inventoryUnit.consumed, true);
 
-        assertEq(buyer.balance, buyerBalBefore - unitPrice);
-        assertEq(address(store).balance, unitPrice);
+        assertEq(usdc.balanceOf(buyer), buyerBalBefore - unitPrice);
+        assertEq(usdc.balanceOf(address(store)), unitPrice);
 
         RevealDeliveryStore.Listing memory listing = store.getListing(listingId);
         assertEq(listing.soldInventoryUnits, 1);
@@ -362,18 +393,20 @@ contract RevealDeliveryStoreTest is Test {
 
         _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
-        vm.prank(buyer2);
+        vm.startPrank(buyer2);
+        usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealDeliveryStore.SoldOut.selector);
-        store.purchaseDelivery{value: unitPrice}(listingId, buyer2PubKey);
+        store.purchaseDelivery(listingId, buyer2PubKey);
+        vm.stopPrank();
     }
 
-    function test_PurchaseDelivery_BadPriceReverts() public {
+    function test_PurchaseDelivery_WithoutApprovalReverts() public {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
         vm.prank(buyer);
-        vm.expectRevert(RevealDeliveryStore.BadPrice.selector);
-        store.purchaseDelivery{value: unitPrice - 1}(listingId, buyerPubKey);
+        vm.expectRevert();
+        store.purchaseDelivery(listingId, buyerPubKey);
     }
 
     function test_PurchaseDelivery_EmptyPubKeyReverts() public {
@@ -382,13 +415,13 @@ contract RevealDeliveryStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(RevealDeliveryStore.InvalidParams.selector);
-        store.purchaseDelivery{value: unitPrice}(listingId, "");
+        store.purchaseDelivery(listingId, "");
     }
 
     function test_PurchaseDelivery_NonexistentListingReverts() public {
         vm.prank(buyer);
         vm.expectRevert(RevealDeliveryStore.ListingNotFound.selector);
-        store.purchaseDelivery{value: unitPrice}(999, buyerPubKey);
+        store.purchaseDelivery(999, buyerPubKey);
     }
 
     function test_Permissions_NonSellerCannotDeliverEscrow() public {
@@ -429,7 +462,7 @@ contract RevealDeliveryStoreTest is Test {
         _addInventoryUnitsAsSeller(listingId, 1);
 
         uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
-        uint256 sellerBalBefore = seller.balance;
+        uint256 sellerBalBefore = usdc.balanceOf(seller);
 
         vm.expectEmit(true, true, true, true);
         emit RevealDeliveryStore.EscrowDelivered(escrowId, listingId, buyer, resourceId, "ipfs://cid-1");
@@ -444,8 +477,8 @@ contract RevealDeliveryStoreTest is Test {
         RevealDeliveryStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
         assertEq(inventoryUnit.contentCID, "ipfs://cid-1");
 
-        assertEq(seller.balance, sellerBalBefore + unitPrice);
-        assertEq(address(store).balance, 0);
+        assertEq(usdc.balanceOf(seller), sellerBalBefore + unitPrice);
+        assertEq(usdc.balanceOf(address(store)), 0);
     }
 
     function test_DeliverEscrow_PaysProtocolFeeAndSellerNet() public {
@@ -455,8 +488,8 @@ contract RevealDeliveryStoreTest is Test {
         _addInventoryUnitsAsSeller(listingId, 1);
 
         uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
-        uint256 sellerBalBefore = seller.balance;
-        uint256 feeRecipientBalBefore = feeRecipient.balance;
+        uint256 sellerBalBefore = usdc.balanceOf(seller);
+        uint256 feeRecipientBalBefore = usdc.balanceOf(feeRecipient);
         uint256 protocolFee = unitPrice * 500 / 10_000;
 
         vm.expectEmit(true, true, true, true);
@@ -467,9 +500,9 @@ contract RevealDeliveryStoreTest is Test {
         vm.prank(seller);
         store.deliverEscrow(escrowId, "ipfs://cid-1", hex"deadbeef");
 
-        assertEq(feeRecipient.balance, feeRecipientBalBefore + protocolFee);
-        assertEq(seller.balance, sellerBalBefore + (unitPrice - protocolFee));
-        assertEq(address(store).balance, 0);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalBefore + protocolFee);
+        assertEq(usdc.balanceOf(seller), sellerBalBefore + (unitPrice - protocolFee));
+        assertEq(usdc.balanceOf(address(store)), 0);
     }
 
     function test_DeliverEscrow_AtDeadlineSucceeds() public {
@@ -518,7 +551,7 @@ contract RevealDeliveryStoreTest is Test {
 
     function test_DeliverEscrow_RevertsWhenRakeEngineReturnsQuoteAboveSettlementCap() public {
         BadQuoteRakeEngineMock badQuoteRakeEngine = new BadQuoteRakeEngineMock();
-        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine));
+        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine), address(usdc));
 
         vm.prank(seller);
         uint256 listingId = badQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
@@ -526,8 +559,7 @@ contract RevealDeliveryStoreTest is Test {
         vm.prank(seller);
         badQuoteStore.addInventoryUnitsToListing(listingId, 1);
 
-        vm.prank(buyer);
-        uint256 escrowId = badQuoteStore.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(badQuoteStore, listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         vm.expectRevert(RevealDeliveryStore.BadState.selector);
@@ -536,7 +568,8 @@ contract RevealDeliveryStoreTest is Test {
 
     function test_DeliverEscrow_RevertsWhenRakeEngineReturnsFullAmountFee() public {
         FullAmountQuoteRakeEngineMock fullAmountQuoteRakeEngine = new FullAmountQuoteRakeEngineMock();
-        RevealDeliveryStore fullAmountQuoteStore = new RevealDeliveryStore(address(fullAmountQuoteRakeEngine));
+        RevealDeliveryStore fullAmountQuoteStore =
+            new RevealDeliveryStore(address(fullAmountQuoteRakeEngine), address(usdc));
 
         vm.prank(seller);
         uint256 listingId = fullAmountQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
@@ -544,8 +577,7 @@ contract RevealDeliveryStoreTest is Test {
         vm.prank(seller);
         fullAmountQuoteStore.addInventoryUnitsToListing(listingId, 1);
 
-        vm.prank(buyer);
-        uint256 escrowId = fullAmountQuoteStore.purchaseDelivery{value: unitPrice}(listingId, buyerPubKey);
+        uint256 escrowId = _purchaseDeliveryAs(fullAmountQuoteStore, listingId, buyer, buyerPubKey);
 
         vm.prank(seller);
         vm.expectRevert(RevealDeliveryStore.BadState.selector);
@@ -580,7 +612,7 @@ contract RevealDeliveryStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         _addInventoryUnitsAsSeller(listingId, 1);
 
-        uint256 buyerBalBefore = buyer.balance;
+        uint256 buyerBalBefore = usdc.balanceOf(buyer);
         uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
@@ -594,7 +626,7 @@ contract RevealDeliveryStoreTest is Test {
 
         RevealDeliveryStore.Escrow memory escrow = store.getEscrow(escrowId);
         assertEq(uint8(escrow.status), uint8(RevealDeliveryStore.EscrowStatus.Reclaimed));
-        assertEq(buyer.balance, buyerBalBefore);
+        assertEq(usdc.balanceOf(buyer), buyerBalBefore);
 
         // Consumed inventory stays consumed (no recycle)
         RevealDeliveryStore.InventoryUnit memory inventoryUnit = store.getInventoryUnit(escrow.inventoryUnitId);
@@ -610,7 +642,7 @@ contract RevealDeliveryStoreTest is Test {
         _addInventoryUnitsAsSeller(listingId, 1);
 
         uint256 escrowId = _purchaseDeliveryAs(listingId, buyer, buyerPubKey);
-        uint256 feeRecipientBalBefore = feeRecipient.balance;
+        uint256 feeRecipientBalBefore = usdc.balanceOf(feeRecipient);
 
         uint64 deadline = store.getEscrow(escrowId).deadline;
         vm.warp(uint256(deadline) + 1);
@@ -618,7 +650,7 @@ contract RevealDeliveryStoreTest is Test {
         vm.prank(buyer);
         store.reclaimEscrow(escrowId);
 
-        assertEq(feeRecipient.balance, feeRecipientBalBefore);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalBefore);
     }
 
     function test_ReclaimEscrow_BeforeDeadlineReverts() public {
@@ -697,7 +729,7 @@ contract RevealDeliveryStoreTest is Test {
 
     function test_QuotePurchaseDelivery_RevertsWhenRakeEngineReturnsQuoteAboveSettlementCap() public {
         BadQuoteRakeEngineMock badQuoteRakeEngine = new BadQuoteRakeEngineMock();
-        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine));
+        RevealDeliveryStore badQuoteStore = new RevealDeliveryStore(address(badQuoteRakeEngine), address(usdc));
 
         vm.prank(seller);
         uint256 listingId = badQuoteStore.createListing(title, resourceId, unitPrice, refundWindow);
