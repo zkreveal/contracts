@@ -7,8 +7,10 @@ import {FeeMath} from "./FeeMath.sol";
 import {IRakeEngine} from "./IRakeEngine.sol";
 
 /// @title RakeEngine
-/// @notice Fee policy engine for zkReveal delivery settlements.
-/// @dev Refunds do not incur protocol fees. Explicit 0 bps overrides are supported via separate presence flags.
+/// @notice Fee policy engine for a single zkReveal settlement flow deployment.
+/// @dev Listing-level overrides are scoped to the store that uses this engine instance.
+///      Separate store modes should use separate rake engine deployments to avoid listing ID collisions.
+///      Explicit 0 bps overrides are supported via separate presence flags.
 contract RakeEngine is Ownable, IRakeEngine {
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
 
@@ -20,6 +22,7 @@ contract RakeEngine is Ownable, IRakeEngine {
     mapping(address => bool) public hasSellerFeeBpsOverride;
     mapping(address => uint16) public sellerFeeBpsOverride;
 
+    /// @dev Listing override state is scoped to the single store deployment backed by this engine instance.
     mapping(uint256 => bool) public hasListingFeeBpsOverride;
     mapping(uint256 => uint16) public listingFeeBpsOverride;
 
@@ -110,6 +113,17 @@ contract RakeEngine is Ownable, IRakeEngine {
     }
 
     function quoteDeliveryRake(address seller, uint256 listingId, uint256 grossAmount)
+        external
+        view
+        returns (address recipient, uint256 feeAmount)
+    {
+        uint16 feeBps = getEffectiveFeeBps(seller, listingId);
+
+        recipient = feeRecipient;
+        feeAmount = grossAmount * feeBps / FeeMath.BPS_DENOMINATOR;
+    }
+
+    function quoteReceiptRake(address seller, uint256 listingId, uint256 grossAmount)
         external
         view
         returns (address recipient, uint256 feeAmount)

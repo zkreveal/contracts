@@ -9,5 +9,10 @@ interface IRakeEngine {
         view
         returns (address recipient, uint256 feeAmount);
 
+    function quoteReceiptRake(address seller, uint256 listingId, uint256 grossAmount)
+        external
+        view
+        returns (address recipient, uint256 feeAmount);
+
     function getEffectiveFeeBps(address seller, uint256 listingId) external view returns (uint16);
 }

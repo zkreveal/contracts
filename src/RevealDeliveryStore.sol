@@ -9,8 +9,9 @@ import {FeeMath} from "./FeeMath.sol";
 import {IRakeEngine} from "./IRakeEngine.sol";
 
 /// @title RevealDeliveryStore
-/// @notice Inventory-based encrypted delivery purchases settled in a single ERC-20 token.
-/// @dev Sellers create listings, add inventory units, buyers escrow settlement token base units, and settlement remains escrow-based internally.
+/// @notice Seller-first managed delivery contract for zkReveal Delivery Mode.
+/// @dev Sellers create listings and inventory, buyers purchase through escrowed ERC-20 settlement,
+/// and delivery is completed through encrypted off-chain fulfillment plus on-chain settlement logic.
 contract RevealDeliveryStore is ReentrancyGuard {
     using SafeERC20 for IERC20;
 

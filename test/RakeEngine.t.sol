@@ -35,7 +35,7 @@ contract RakeEngineTest is Test {
         assertEq(rakeEngine.defaultFeeBps(), defaultFeeBps);
     }
 
-    function test_Constructor_ExposesMaxBps() public view {
+    function test_Constructor_DefaultDeliveryQuoteUsesInitialDefaultFee() public view {
         (, uint256 feeAmount) = rakeEngine.quoteDeliveryRake(aliceSeller, 1, 10_000);
 
         assertEq(feeAmount, 250);
@@ -288,6 +288,42 @@ contract RakeEngineTest is Test {
         rakeEngine.clearListingFeeBpsOverride(7);
     }
 
+    function test_SeparateEngineInstances_IsolateListingOverrides() public {
+        RakeEngine deliveryEngine = new RakeEngine(owner, feeRecipient, defaultFeeBps);
+        RakeEngine receiptEngine = new RakeEngine(owner, feeRecipient, defaultFeeBps);
+
+        vm.prank(owner);
+        deliveryEngine.setListingFeeBpsOverride(1, 600);
+
+        assertEq(deliveryEngine.getEffectiveFeeBps(aliceSeller, 1), 600);
+        assertEq(receiptEngine.getEffectiveFeeBps(aliceSeller, 1), defaultFeeBps);
+
+        (, uint256 deliveryFeeAmount) = deliveryEngine.quoteDeliveryRake(aliceSeller, 1, 10_000);
+        (, uint256 receiptFeeAmount) = receiptEngine.quoteReceiptRake(aliceSeller, 1, 10_000);
+
+        assertEq(deliveryFeeAmount, 600);
+        assertEq(receiptFeeAmount, 250);
+    }
+
+    function test_SeparateEngineInstances_IsolateSellerOverridesAndExemptions() public {
+        RakeEngine deliveryEngine = new RakeEngine(owner, feeRecipient, defaultFeeBps);
+        RakeEngine receiptEngine = new RakeEngine(owner, feeRecipient, defaultFeeBps);
+
+        vm.startPrank(owner);
+        deliveryEngine.setSellerFeeBpsOverride(aliceSeller, 500);
+        deliveryEngine.setSellerFeeExempt(aliceSeller, true);
+        vm.stopPrank();
+
+        assertEq(deliveryEngine.getEffectiveFeeBps(aliceSeller, 1), 0);
+        assertEq(receiptEngine.getEffectiveFeeBps(aliceSeller, 1), defaultFeeBps);
+
+        (, uint256 deliveryFeeAmount) = deliveryEngine.quoteDeliveryRake(aliceSeller, 1, 10_000);
+        (, uint256 receiptFeeAmount) = receiptEngine.quoteReceiptRake(aliceSeller, 1, 10_000);
+
+        assertEq(deliveryFeeAmount, 0);
+        assertEq(receiptFeeAmount, 250);
+    }
+
     function test_GetEffectiveFeeBps_NoOverrideReturnsDefault() public view {
         assertEq(rakeEngine.getEffectiveFeeBps(aliceSeller, 1), defaultFeeBps);
     }
@@ -433,6 +469,65 @@ contract RakeEngineTest is Test {
         vm.stopPrank();
 
         (, uint256 feeAmount) = rakeEngine.quoteDeliveryRake(aliceSeller, 7, 1000);
+
+        assertEq(feeAmount, 0);
+    }
+
+    function test_QuoteReceiptRake_ReturnsFeeRecipient() public view {
+        (address recipient,) = rakeEngine.quoteReceiptRake(aliceSeller, 1, 1 ether);
+
+        assertEq(recipient, feeRecipient);
+    }
+
+    function test_QuoteReceiptRake_DefaultFeeMathIsCorrect() public view {
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(aliceSeller, 1, 1 ether);
+
+        assertEq(feeAmount, 0.025 ether);
+    }
+
+    function test_QuoteReceiptRake_ListingOverrideFeeMathIsCorrect() public {
+        vm.prank(owner);
+        rakeEngine.setListingFeeBpsOverride(7, 300);
+
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(bobSeller, 7, 1 ether);
+
+        assertEq(feeAmount, 0.03 ether);
+    }
+
+    function test_QuoteReceiptRake_SellerOverrideFeeMathIsCorrect() public {
+        vm.prank(owner);
+        rakeEngine.setSellerFeeBpsOverride(aliceSeller, 500);
+
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(aliceSeller, 1, 1000);
+
+        assertEq(feeAmount, 50);
+    }
+
+    function test_QuoteReceiptRake_ExemptSellerReturnsZeroFee() public {
+        vm.prank(owner);
+        rakeEngine.setSellerFeeExempt(aliceSeller, true);
+
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(aliceSeller, 1, 1 ether);
+
+        assertEq(feeAmount, 0);
+    }
+
+    function test_QuoteReceiptRake_ExplicitZeroOverrideReturnsZeroFee() public {
+        vm.prank(owner);
+        rakeEngine.setSellerFeeBpsOverride(aliceSeller, 0);
+
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(aliceSeller, 1, 1000);
+
+        assertEq(feeAmount, 0);
+    }
+
+    function test_QuoteReceiptRake_ExplicitZeroListingOverrideReturnsZeroFee() public {
+        vm.startPrank(owner);
+        rakeEngine.setSellerFeeBpsOverride(aliceSeller, 500);
+        rakeEngine.setListingFeeBpsOverride(7, 0);
+        vm.stopPrank();
+
+        (, uint256 feeAmount) = rakeEngine.quoteReceiptRake(aliceSeller, 7, 1000);
 
         assertEq(feeAmount, 0);
     }
