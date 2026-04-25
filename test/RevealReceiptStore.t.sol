@@ -19,6 +19,25 @@ contract ReceiptMockUSDC is ERC20 {
     }
 }
 
+contract RevealReceiptStoreHarness is RevealReceiptStore {
+    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_)
+        RevealReceiptStore(settlementToken_, feeRecipient_, protocolFeeBps_)
+    {}
+
+    function purchaseSignedReceiptForPayerAndExpectedBuyer(
+        SignedReceiptQuote calldata quote,
+        bytes calldata sellerSignature,
+        address payer,
+        address expectedBuyer
+    ) external nonReentrant listingExists(quote.listingId) returns (uint256 receiptId) {
+        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer);
+
+        return _settleReceiptPurchase(
+            quote.listingId, listing.seller, payer, expectedBuyer, quote.amount, quote.purchaseRef, listing.resourceId
+        );
+    }
+}
+
 contract RevealReceiptStoreTest is Test {
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -69,6 +88,10 @@ contract RevealReceiptStoreTest is Test {
         deployedStore = new RevealReceiptStore(address(usdc), feeRecipient, feeBps);
     }
 
+    function _deployHarnessStore(uint16 feeBps) internal returns (RevealReceiptStoreHarness deployedStore) {
+        deployedStore = new RevealReceiptStoreHarness(address(usdc), feeRecipient, feeBps);
+    }
+
     function _createListingAs(address sellerAccount, string memory listingTitle, string memory listingResourceId)
         internal
         returns (uint256 listingId)
@@ -102,8 +125,10 @@ contract RevealReceiptStoreTest is Test {
         internal
         returns (uint256 receiptId)
     {
+        RevealReceiptStore.Listing memory listing = targetStore.getListing(listingId);
+
         vm.startPrank(who);
-        usdc.approve(address(targetStore), unitPrice);
+        usdc.approve(address(targetStore), listing.unitPrice);
         receiptId = targetStore.purchaseReceipt(listingId, ref);
         vm.stopPrank();
     }
@@ -247,6 +272,17 @@ contract RevealReceiptStoreTest is Test {
         assertEq(zeroFeeStore.protocolFeeBps(), 0);
     }
 
+    function test_EIP712Constants_AreExpected() public view {
+        assertEq(store.EIP712_NAME(), "RevealReceiptStore");
+        assertEq(store.EIP712_VERSION(), "1");
+        assertEq(
+            store.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
+            keccak256(
+                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)"
+            )
+        );
+    }
+
     function test_SetListingActive_TogglesAndBlocksPurchases() public {
         uint256 listingId = _createListingAsSeller();
 
@@ -314,6 +350,14 @@ contract RevealReceiptStoreTest is Test {
         store.setQuoteSigner(quoteSigner, true);
 
         assertEq(store.authorizedQuoteSigners(seller, quoteSigner), true);
+    }
+
+    function test_SetQuoteSigner_IsScopedToCaller() public {
+        vm.prank(seller);
+        store.setQuoteSigner(quoteSigner, true);
+
+        assertEq(store.authorizedQuoteSigners(seller, quoteSigner), true);
+        assertEq(store.authorizedQuoteSigners(seller2, quoteSigner), false);
     }
 
     function test_SetQuoteSigner_RevokesSigner() public {
@@ -630,6 +674,42 @@ contract RevealReceiptStoreTest is Test {
         vm.expectRevert(RevealReceiptStore.QuoteBuyerMismatch.selector);
         store.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_InternalPayerCanDifferFromReceiptBuyer() public {
+        RevealReceiptStoreHarness harnessStore = _deployHarnessStore(0);
+        uint256 listingId = _createListingAs(harnessStore, seller, title, resourceId);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(harnessStore, SELLER_PK, quote);
+        address gatewayAdapter = address(0xADA702);
+        usdc.mint(gatewayAdapter, quotedAmount);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 gatewayAdapterBalanceBefore = usdc.balanceOf(gatewayAdapter);
+
+        vm.prank(gatewayAdapter);
+        usdc.approve(address(harnessStore), quotedAmount);
+
+        vm.prank(gatewayAdapter);
+        uint256 receiptId =
+            harnessStore.purchaseSignedReceiptForPayerAndExpectedBuyer(quote, signature, gatewayAdapter, buyer);
+
+        RevealReceiptStore.Receipt memory receipt = harnessStore.getReceipt(receiptId);
+        uint256[] memory buyerReceiptIds = harnessStore.getReceiptsByBuyer(buyer);
+
+        assertEq(receiptId, 1);
+        assertEq(receipt.buyer, buyer);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(receipt.purchaseRef, purchaseRef);
+        assertEq(buyerReceiptIds.length, 1);
+        assertEq(buyerReceiptIds[0], receiptId);
+        assertEq(harnessStore.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
+        assertEq(usdc.balanceOf(gatewayAdapter), gatewayAdapterBalanceBefore - quotedAmount);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + quotedAmount);
+        assertEq(usdc.balanceOf(address(harnessStore)), 0);
     }
 
     function test_PurchaseSignedReceipt_ExpiredQuoteReverts() public {

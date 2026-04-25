@@ -215,15 +215,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         if (listings[listingId].seller != msg.sender) revert NotListingSeller();
     }
 
-    function _verifySignedReceiptQuote(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
-        internal
-        view
-        returns (Listing storage listing)
-    {
+    function _verifySignedReceiptQuote(
+        SignedReceiptQuote calldata quote,
+        bytes calldata sellerSignature,
+        address expectedBuyer
+    ) internal view returns (Listing storage listing) {
         listing = listings[quote.listingId];
 
         if (!listing.active) revert ListingInactive();
-        if (quote.buyer != msg.sender) revert QuoteBuyerMismatch();
+        if (quote.buyer != expectedBuyer) revert QuoteBuyerMismatch();
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
         if (quote.amount == 0) revert InvalidParams();
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
@@ -236,15 +236,18 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         }
     }
 
+    /// @dev `payer` provides the settlement token. `receiptBuyer` is the buyer recorded on-chain.
+    ///      In direct v1 purchases both are `msg.sender`; future adapter flows may split them.
     function _settleReceiptPurchase(
         uint256 listingId,
         address seller,
-        address buyer,
+        address payer,
+        address receiptBuyer,
         uint256 amount,
         bytes32 purchaseRef,
         string memory resourceId
     ) internal returns (uint256 receiptId) {
-        settlementToken.safeTransferFrom(buyer, address(this), amount);
+        settlementToken.safeTransferFrom(payer, address(this), amount);
 
         purchaseRefUsed[seller][purchaseRef] = true;
 
@@ -254,12 +257,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         receipt.exists = true;
         receipt.listingId = listingId;
         receipt.seller = seller;
-        receipt.buyer = buyer;
+        receipt.buyer = receiptBuyer;
         receipt.amount = amount;
         receipt.purchaseRef = purchaseRef;
         receipt.issuedAt = uint64(block.timestamp);
 
-        receiptsByBuyer[buyer].push(receiptId);
+        receiptsByBuyer[receiptBuyer].push(receiptId);
         receiptsBySeller[seller].push(receiptId);
         receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
 
@@ -272,7 +275,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
 
         settlementToken.safeTransfer(seller, amount - protocolFee);
 
-        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, buyer, amount, resourceId);
+        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, receiptBuyer, amount, resourceId);
     }
 
     // -------------------------------------------------------------------------
@@ -359,7 +362,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         if (purchaseRefUsed[listing.seller][purchaseRef]) revert PurchaseRefAlreadyUsed();
 
         return _settleReceiptPurchase(
-            listingId, listing.seller, msg.sender, listing.unitPrice, purchaseRef, listing.resourceId
+            listingId, listing.seller, msg.sender, msg.sender, listing.unitPrice, purchaseRef, listing.resourceId
         );
     }
 
@@ -373,10 +376,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         listingExists(quote.listingId)
         returns (uint256 receiptId)
     {
-        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature);
+        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, msg.sender);
 
         return _settleReceiptPurchase(
-            quote.listingId, listing.seller, msg.sender, quote.amount, quote.purchaseRef, listing.resourceId
+            quote.listingId, listing.seller, msg.sender, msg.sender, quote.amount, quote.purchaseRef, listing.resourceId
         );
     }
 
@@ -398,7 +401,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
 
     /// @notice Returns the EIP-712 digest for a seller-authorized signed receipt quote.
     /// @dev The digest includes the derived seller, settlement token, current chain ID, and this contract address.
-    /// It may be signed by the listing seller or by a quote signer authorized by that seller.
+    ///      It may be signed by the listing seller or by a quote signer authorized by that seller.
     function hashSignedReceiptQuote(SignedReceiptQuote calldata quote)
         public
         view
