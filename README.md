@@ -1,310 +1,87 @@
 # Reveal Protocol
 
-Reveal Protocol is an on-chain encrypted digital delivery escrow primitive.
+This branch is focused on `RevealReceiptStore`, a receipt-only settlement contract for mainnet deployment.
 
-It enables sellers to deliver encrypted access (files, credentials, or content) to buyers using time-bound escrow, where delivery is enforced on-chain and decryption happens off-chain.
-
-This repository contains the v0 smart contract implementation for Reveal Protocol, built with Foundry. The current source-level contract name is `RevealDeliveryStore`, while the Arbitrum Sepolia deployment predates this rename and still appears under the legacy contract name `ZkRevealStore`.
-
-Reveal Protocol is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
-
-## Why Reveal Protocol
-
-Most digital commerce today relies on trusted platforms to handle delivery of digital goods.
-
-Reveal Protocol introduces a minimal on-chain primitive for:
-- encrypted delivery of digital assets
-- time-bound escrow with automatic refund
-- composable purchase receipts on-chain
-
-This enables new patterns for:
-- private data marketplaces
-- API key or credential delivery
-- gated content and access systems
-
-## Why Arbitrum
-
-Reveal Protocol benefits from Arbitrum’s:
-
-- low transaction costs for frequent delivery purchases
-- fast confirmations for buyer-seller interactions
-- strong EVM compatibility and tooling
-- suitability for building higher-level protocols on top
-
-Arbitrum provides a practical base layer for scaling encrypted delivery primitives into real-world applications.
-
-> ⚠️ **Warning**
-> This is a v0 trusted-seller escrow model.  
-> The contract enforces delivery timing but does not verify correctness of delivered content.  
-> Do not use in production without further validation and auditing.
-
-## System Flow
-
-Seller creates listing
-→ Adds inventory units
-→ Buyer purchases delivery with public key
-→ Seller delivers encrypted payload + CID before deadline
-
-Outcome:
-- Delivered → seller paid
-- Timeout → buyer refunded
-
-This flow ensures that payment is conditional on timely delivery, while keeping content encryption and verification fully off-chain.
-
-## Architecture (v0)
-
-Reveal Protocol uses a hierarchical model:
-
-- `Listing`: reusable sale entry with human-readable `title`, seller-defined `resourceId`, and per-unit price.
-- `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
-- `Escrow`: one buyer purchase tied to exactly one allocated inventory unit.
-
-Seller identity is defined by the seller’s wallet address.
-
-## Security Model (v0)
-
-This contract is a trusted-seller delivery escrow, not a trustless proof system.
-
-- `deliverEscrow` only verifies that `contentCID` and `encryptedKey` are non-empty and submitted on or before the escrow deadline.
-- The contract does not prove that the CID or encrypted payload are correct for the allocated item.
-- Seller is paid immediately after successful delivery submission.
-- Correctness of the delivered payload is verified off-chain by the buyer.
-
-## On-Chain Visibility
-
-The following data is public on-chain or retrievable from contract state:
-
-- listing `title` and `resourceId`
-- delivered `InventoryUnit.contentCID`
-- `Escrow.buyerPubKey`
-- `Escrow.encryptedKey`
-- escrow timestamps, status, seller, buyer, listing id, and inventory unit id
-
-The following data is not stored on-chain:
-
-- plaintext content
-- buyer private key
-- decrypted symmetric key material
+Sellers create listings with a `title`, `resourceId`, and `unitPrice`. Buyers purchase those listings using seller-issued `purchaseRef` values. Payment settles immediately in the configured ERC-20 settlement token, and the contract records a canonical on-chain receipt for downstream reconciliation.
 
 ## Core Contract
 
-- `src/RevealDeliveryStore.sol`
+- `src/RevealReceiptStore.sol`
 
 Key storage:
 
 - `listings[listingId]`
-- `inventoryUnits[inventoryUnitId]`
-- `escrows[escrowId]`
+- `receipts[receiptId]`
 - `listingsBySeller[seller]`
-- `listingInventoryUnitIds[listingId]`
+- `receiptsByBuyer[buyer]`
+- `receiptsBySeller[seller]`
+- `purchaseRefUsed[seller][purchaseRef]`
+- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
 
-Escrow status:
+## Receipt Flow
 
-- `Pending`
-- `Delivered`
-- `Reclaimed`
+Seller flow:
+
+1. Call `createListing(title, resourceId, unitPrice)`.
+2. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
+3. Generate a seller-scoped `purchaseRef` off-chain for a buyer order.
+
+Buyer flow:
+
+1. Approve the ERC-20 settlement token to the store.
+2. Call `purchaseReceipt(listingId, purchaseRef)`.
+3. Read the stored receipt on-chain or index the `ReceiptPurchased` event.
+
+Settlement behavior:
+
+- buyer funds are pulled with `transferFrom`
+- protocol fee is computed in-contract from immutable deployment config
+- protocol fee is sent to `feeRecipient` when `protocolFeeBps > 0`
+- seller receives the remaining settlement amount immediately
+
+## Fee Model
+
+`RevealReceiptStore` no longer depends on a separate `RakeEngine`.
+
+Deployment config is now:
+
+- `settlementToken`
+- `feeRecipient`
+- `protocolFeeBps`
+
+Constraints:
+
+- `protocolFeeBps` is capped at `1_000` basis points
+- `feeRecipient` must be non-zero when `protocolFeeBps > 0`
 
 ## Listing Identity
 
-- `listingId` is the canonical protocol-local on-chain identifier.
-- `resourceId` is a seller-defined, machine-readable, non-normalized identifier for integrations.
-- `resourceId` is not unique and must not be treated as a globally safe identifier by itself.
+- `listingId` is the canonical on-chain identifier.
+- `resourceId` is seller-defined semantic metadata for integrations.
+- `purchaseRef` must be unique per seller.
 
-For off-chain canonical identity, prefer:
+Recommended off-chain identifiers:
 
-- `(chainId, contractAddress, listingId)`
-
-For off-chain semantic identity, prefer:
-
-- `(chainId, contractAddress, seller, resourceId)`
-
-Each escrow can be treated as an on-chain purchase receipt. A delivered escrow is a delivered claim for the listing's semantic resource identity.
-
-## High-Level Flows
-
-### Seller flow
-
-1. Create listing via `createListing(title, resourceId, unitPrice, refundWindow)`.
-2. Add inventory units via `addInventoryUnitsToListing(listingId, count)`.
-3. Buyer purchases delivery via `purchaseDelivery`.
-4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
-5. Contract pays seller immediately on successful delivery submission.
-
-### Buyer flow
-
-1. Generate buyer encryption keypair off-chain.
-2. Call `purchaseDelivery(listingId, buyerPubKey)` and pay exact `unitPrice`.
-3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
-4. Read the delivered `contentCID` from the allocated inventory unit via `getInventoryUnit(escrow.inventoryUnitId)`.
-5. Decrypt content key off-chain and use the delivered `contentCID`.
-6. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
-
-## Function Interface and Data Use
-
-### `createListing(string title, string resourceId, uint256 unitPrice, uint64 refundWindow)`
-
-Inputs:
-
-- `title`: listing name
-- `resourceId`: seller-defined semantic identifier for integrations
-- `unitPrice`: price per item
-- `refundWindow`: escrow reclaim window
-
-Uses:
-
-- validates non-empty title, non-empty resourceId, non-zero price, and refund window bounds
-
-Writes:
-
-- new `Listing`
-- `listingsBySeller[msg.sender]`
-
-### `addInventoryUnitsToListing(uint256 listingId, uint256 count)`
-
-Inputs:
-
-- `listingId`
-- `count`: number of inventory units to add
-
-Uses:
-
-- caller must be listing seller
-- count must be greater than zero
-
-Writes:
-
-- appends empty `InventoryUnit` rows
-- appends to `listingInventoryUnitIds[listingId]`
-- increments listing `totalInventoryUnits`
-
-### `setListingActive(uint256 listingId, bool active)`
-
-Inputs:
-
-- `listingId`
-- `active`
-
-Uses:
-
-- caller must be listing seller
-
-Writes:
-
-- listing availability flag
-
-### `purchaseDelivery(uint256 listingId, bytes buyerPubKey) payable`
-
-Inputs:
-
-- `listingId`
-- `buyerPubKey`
-- `msg.value`
-
-Uses:
-
-- listing must be active with available inventory
-- `msg.value` must equal listing `unitPrice`
-- internally calls `_allocateNextInventoryUnit(listingId)` (sequential allocation)
-
-Writes:
-
-- marks one `InventoryUnit` as `consumed`
-- creates `Escrow` with listing/inventory-unit linkage, buyer/seller, amount, key, timestamps, deadline, status
-
-### `deliverEscrow(uint256 escrowId, string contentCID, bytes encryptedKey)`
-
-Inputs:
-
-- `escrowId`
-- `contentCID`
-- `encryptedKey`
-
-Uses:
-
-- caller must be escrow seller
-- escrow must be `Pending`
-- `contentCID` must be non-empty
-- must be on or before deadline
-
-Writes:
-
-- stores `contentCID` on the allocated `InventoryUnit`
-- stores `encryptedKey`
-- sets escrow status to `Delivered`
-- transfers escrow amount to seller
-
-**Note:**
-
-- the contract does not verify whether `contentCID` or `encryptedKey` are correct for the buyer or the allocated item
-
-### `reclaimEscrow(uint256 escrowId)`
-
-Inputs:
-
-- `escrowId`
-
-Uses:
-
-- caller must be escrow buyer
-- escrow must be `Pending`
-- deadline must have passed
-
-Writes:
-
-- sets escrow status to `Reclaimed`
-- refunds escrow amount to buyer
-- inventory units are not restored after reclaim
-
-## Events
-
-- `ListingCreated` includes `resourceId`
-- `InventoryUnitAdded`
-- `ListingStatusChanged`
-- `EscrowCreated` keeps prior fields and appends `resourceId`
-- `EscrowDelivered` includes `listingId`, `buyer`, `resourceId`, and `contentCID`
-- `EscrowReclaimed` includes `listingId`, `buyer`, and `resourceId`
-
-## Deployments
-
-### Arbitrum Sepolia
-
-- Status: Deployed and live on Arbitrum Sepolia
-- Note: this deployment was published before the rename and uses the legacy source-level contract name `ZkRevealStore`
-- Chain ID: 421614
-- Contract: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
-- Transaction: [View on Arbiscan](https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f)
-- Block: 254067517
-
-### Mainnet
-- Planned target: Arbitrum One
-
-## Setup
-This project reads configuration from environment variables.
-
-```bash
-export DEPLOYER_PRIVATE_KEY="YOUR_PRIVATE_KEY"
-export RPC_ARB_SEPOLIA="YOUR_ARBITRUM_SEPOLIA_RPC_URL"
-```
+- canonical listing identity: `(chainId, contractAddress, listingId)`
+- semantic listing identity: `(chainId, contractAddress, seller, resourceId)`
+- canonical receipt lookup: `(chainId, contractAddress, seller, purchaseRef)`
 
 ## Development
 
+Common commands:
+
 ```bash
 forge build
-forge fmt --check
 forge test
-
-forge script script/Deploy.s.sol:Deploy \
-  --rpc-url "$RPC_ARB_SEPOLIA" \
-  --private-key "$DEPLOYER_PRIVATE_KEY" \
-  --broadcast
 ```
 
-## Additional Docs
+## Deployment
 
-- `docs/ENCRYPTION_SPEC_V0.md` — encryption and delivery model
-- `docs/LOCK_SPEC.md` — escrow lifecycle and state transitions
+The deploy script at `script/Deploy.s.sol` expects these environment variables:
 
-## License
+- `DEPLOYER_PRIVATE_KEY`
+- `SETTLEMENT_TOKEN`
+- `RECEIPT_PROTOCOL_FEE_BPS`
+- `TREASURY_MULTISIG` when `RECEIPT_PROTOCOL_FEE_BPS > 0`
 
-This project is licensed under the Apache-2.0 License.
-See `LICENSE` for details.
+The included `.env.example` also contains RPC and Arbiscan placeholders for Arbitrum deployments.

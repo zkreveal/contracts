@@ -6,7 +6,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {FeeMath} from "./FeeMath.sol";
-import {IRakeEngine} from "./IRakeEngine.sol";
 
 /// @title RevealReceiptStore
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
@@ -15,9 +14,11 @@ import {IRakeEngine} from "./IRakeEngine.sol";
 contract RevealReceiptStore is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    IRakeEngine public immutable rakeEngine;
+    uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
+
     IERC20 public immutable settlementToken;
-    uint16 public immutable maxSettlementFeeBps;
+    address public immutable feeRecipient;
+    uint16 public immutable protocolFeeBps;
 
     struct Listing {
         address seller;
@@ -77,7 +78,6 @@ contract RevealReceiptStore is ReentrancyGuard {
     error ListingInactive();
     error InvalidParams();
     error PurchaseRefAlreadyUsed();
-    error BadState();
 
     modifier listingExists(uint256 listingId) {
         _listingExists(listingId);
@@ -89,17 +89,18 @@ contract RevealReceiptStore is ReentrancyGuard {
         _;
     }
 
-    constructor(address rakeEngine_, address settlementToken_) {
-        if (rakeEngine_ == address(0)) revert InvalidParams();
+    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_) {
         if (settlementToken_ == address(0)) revert InvalidParams();
+        if (protocolFeeBps_ > MAX_PROTOCOL_FEE_BPS) revert InvalidParams();
+        if (protocolFeeBps_ > 0 && feeRecipient_ == address(0)) revert InvalidParams();
 
-        rakeEngine = IRakeEngine(rakeEngine_);
         settlementToken = IERC20(settlementToken_);
+        feeRecipient = feeRecipient_;
+        protocolFeeBps = protocolFeeBps_;
+    }
 
-        uint16 settlementFeeCap = rakeEngine.maxProtocolFeeBps();
-        if (settlementFeeCap > FeeMath.BPS_DENOMINATOR) revert InvalidParams();
-
-        maxSettlementFeeBps = settlementFeeCap;
+    function _quoteProtocolFee(uint256 grossAmount) internal view returns (uint256) {
+        return grossAmount * protocolFeeBps / FeeMath.BPS_DENOMINATOR;
     }
 
     function _listingExists(uint256 listingId) internal view {
@@ -181,11 +182,7 @@ contract RevealReceiptStore is ReentrancyGuard {
         receiptsBySeller[listing.seller].push(receiptId);
         receiptIdBySellerAndPurchaseRef[listing.seller][purchaseRef] = receiptId;
 
-        (address feeRecipient, uint256 protocolFee) =
-            rakeEngine.quoteReceiptRake(listing.seller, listingId, listing.unitPrice);
-        if (protocolFee > listing.unitPrice) revert BadState();
-        if (protocolFee > (listing.unitPrice * maxSettlementFeeBps) / FeeMath.BPS_DENOMINATOR) revert BadState();
-        if (protocolFee > 0 && feeRecipient == address(0)) revert BadState();
+        uint256 protocolFee = _quoteProtocolFee(listing.unitPrice);
 
         if (protocolFee > 0) {
             settlementToken.safeTransfer(feeRecipient, protocolFee);
@@ -204,14 +201,12 @@ contract RevealReceiptStore is ReentrancyGuard {
         external
         view
         listingExists(listingId)
-        returns (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address feeRecipient)
+        returns (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient)
     {
         Listing storage listing = listings[listingId];
         grossAmount = listing.unitPrice;
-        (feeRecipient, protocolFee) = rakeEngine.quoteReceiptRake(listing.seller, listingId, grossAmount);
-        if (protocolFee > grossAmount) revert BadState();
-        if (protocolFee > (grossAmount * maxSettlementFeeBps) / FeeMath.BPS_DENOMINATOR) revert BadState();
-        if (protocolFee > 0 && feeRecipient == address(0)) revert BadState();
+        protocolFee = _quoteProtocolFee(grossAmount);
+        quotedFeeRecipient = feeRecipient;
         sellerNet = grossAmount - protocolFee;
     }
 

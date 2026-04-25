@@ -4,7 +4,6 @@ pragma solidity ^0.8.24;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Test} from "forge-std/Test.sol";
 
-import {RakeEngine} from "../src/RakeEngine.sol";
 import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
 
 contract ReceiptMockUSDC is ERC20 {
@@ -19,60 +18,8 @@ contract ReceiptMockUSDC is ERC20 {
     }
 }
 
-contract ReceiptBadRakeEngineMock {
-    function maxProtocolFeeBps() external pure returns (uint16) {
-        return 10_001;
-    }
-}
-
-contract ReceiptBadQuoteRakeEngineMock {
-    function maxProtocolFeeBps() external pure returns (uint16) {
-        return 1_000;
-    }
-
-    function quoteReceiptRake(address, uint256, uint256 grossAmount)
-        external
-        pure
-        returns (address recipient, uint256 feeAmount)
-    {
-        recipient = address(0xFEE);
-        feeAmount = grossAmount * 2_000 / 10_000;
-    }
-}
-
-contract ReceiptGrossOverflowQuoteRakeEngineMock {
-    function maxProtocolFeeBps() external pure returns (uint16) {
-        return 10_000;
-    }
-
-    function quoteReceiptRake(address, uint256, uint256 grossAmount)
-        external
-        pure
-        returns (address recipient, uint256 feeAmount)
-    {
-        recipient = address(0xFEE);
-        feeAmount = grossAmount + 1;
-    }
-}
-
-contract ReceiptZeroRecipientQuoteRakeEngineMock {
-    function maxProtocolFeeBps() external pure returns (uint16) {
-        return 1_000;
-    }
-
-    function quoteReceiptRake(address, uint256, uint256 grossAmount)
-        external
-        pure
-        returns (address recipient, uint256 feeAmount)
-    {
-        recipient = address(0);
-        feeAmount = grossAmount / 10;
-    }
-}
-
 contract RevealReceiptStoreTest is Test {
     ReceiptMockUSDC usdc;
-    RakeEngine rakeEngine;
     RevealReceiptStore store;
 
     address seller = address(0xA11CE);
@@ -90,8 +37,7 @@ contract RevealReceiptStoreTest is Test {
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
-        rakeEngine = new RakeEngine(address(this), feeRecipient, 0);
-        store = new RevealReceiptStore(address(rakeEngine), address(usdc));
+        store = new RevealReceiptStore(address(usdc), feeRecipient, 0);
 
         usdc.mint(buyer, 1_000_000_000);
         usdc.mint(buyer2, 1_000_000_000);
@@ -102,6 +48,10 @@ contract RevealReceiptStoreTest is Test {
         vm.deal(buyer, 10 ether);
         vm.deal(buyer2, 10 ether);
         vm.deal(attacker, 10 ether);
+    }
+
+    function _deployStore(uint16 feeBps) internal returns (RevealReceiptStore deployedStore) {
+        deployedStore = new RevealReceiptStore(address(usdc), feeRecipient, feeBps);
     }
 
     function _createListingAs(address sellerAccount, string memory listingTitle, string memory listingResourceId)
@@ -190,11 +140,23 @@ contract RevealReceiptStoreTest is Test {
         store.createListing(title, resourceId, 0);
     }
 
-    function test_Constructor_RevertsWhenRakeEngineReportsCapAboveBpsDenominator() public {
-        ReceiptBadRakeEngineMock badRakeEngine = new ReceiptBadRakeEngineMock();
+    function test_Constructor_InvalidParamsRevert() public {
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        new RevealReceiptStore(address(0), feeRecipient, 0);
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(badRakeEngine), address(usdc));
+        new RevealReceiptStore(address(usdc), address(0), 1);
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        new RevealReceiptStore(address(usdc), feeRecipient, 1_001);
+    }
+
+    function test_Constructor_AllowsZeroFeeRecipientWhenFeeDisabled() public {
+        RevealReceiptStore zeroFeeStore = new RevealReceiptStore(address(usdc), address(0), 0);
+
+        assertEq(address(zeroFeeStore.settlementToken()), address(usdc));
+        assertEq(zeroFeeStore.feeRecipient(), address(0));
+        assertEq(zeroFeeStore.protocolFeeBps(), 0);
     }
 
     function test_SetListingActive_TogglesAndBlocksPurchases() public {
@@ -272,27 +234,26 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_PurchaseReceipt_PaysProtocolFeeAndSellerNet() public {
-        rakeEngine.setDefaultFeeBps(500);
-
-        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
         uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
         uint256 protocolFee = unitPrice * 500 / 10_000;
 
         vm.startPrank(buyer);
-        usdc.approve(address(store), unitPrice);
+        usdc.approve(address(feeStore), unitPrice);
 
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.ReceiptPurchased(1, listingId, buyer, seller, unitPrice, purchaseRef, resourceId);
 
-        store.purchaseReceipt(listingId, purchaseRef);
+        feeStore.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (unitPrice - protocolFee));
-        assertEq(usdc.balanceOf(address(store)), 0);
+        assertEq(usdc.balanceOf(address(feeStore)), 0);
     }
 
     function test_PurchaseReceipt_ZeroPurchaseRefReverts() public {
@@ -353,96 +314,17 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
     }
 
-    function test_PurchaseReceipt_BadQuoteOverCapRevertsAndStateRollsBack() public {
-        ReceiptBadQuoteRakeEngineMock badQuoteRakeEngine = new ReceiptBadQuoteRakeEngineMock();
-        RevealReceiptStore badStore = new RevealReceiptStore(address(badQuoteRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(badStore, address(this), title, resourceId);
-
-        vm.startPrank(buyer);
-        usdc.approve(address(badStore), unitPrice);
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        badStore.purchaseReceipt(listingId, purchaseRef);
-        vm.stopPrank();
-
-        assertEq(badStore.getReceiptIdBySellerAndPurchaseRef(address(this), purchaseRef), 0);
-        assertEq(badStore.purchaseRefUsed(address(this), purchaseRef), false);
-        assertEq(usdc.balanceOf(address(badStore)), 0);
-    }
-
-    function test_PurchaseReceipt_BadQuoteAboveGrossRevertsAndStateRollsBack() public {
-        ReceiptGrossOverflowQuoteRakeEngineMock grossOverflowQuoteRakeEngine =
-            new ReceiptGrossOverflowQuoteRakeEngineMock();
-        RevealReceiptStore grossOverflowStore =
-            new RevealReceiptStore(address(grossOverflowQuoteRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(grossOverflowStore, address(this), title, resourceId);
-
-        vm.startPrank(buyer);
-        usdc.approve(address(grossOverflowStore), unitPrice);
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        grossOverflowStore.purchaseReceipt(listingId, purchaseRef);
-        vm.stopPrank();
-
-        assertEq(grossOverflowStore.getReceiptIdBySellerAndPurchaseRef(address(this), purchaseRef), 0);
-        assertEq(grossOverflowStore.purchaseRefUsed(address(this), purchaseRef), false);
-        assertEq(usdc.balanceOf(address(grossOverflowStore)), 0);
-    }
-
-    function test_PurchaseReceipt_ZeroFeeRecipientWithPositiveFeeRevertsAndStateRollsBack() public {
-        ReceiptZeroRecipientQuoteRakeEngineMock zeroRecipientRakeEngine = new ReceiptZeroRecipientQuoteRakeEngineMock();
-        RevealReceiptStore zeroRecipientStore = new RevealReceiptStore(address(zeroRecipientRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(zeroRecipientStore, address(this), title, resourceId);
-
-        vm.startPrank(buyer);
-        usdc.approve(address(zeroRecipientStore), unitPrice);
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        zeroRecipientStore.purchaseReceipt(listingId, purchaseRef);
-        vm.stopPrank();
-
-        assertEq(zeroRecipientStore.getReceiptIdBySellerAndPurchaseRef(address(this), purchaseRef), 0);
-        assertEq(zeroRecipientStore.purchaseRefUsed(address(this), purchaseRef), false);
-        assertEq(usdc.balanceOf(address(zeroRecipientStore)), 0);
-    }
-
     function test_QuotePurchaseReceipt_ReturnsGrossFeeAndNet() public {
-        rakeEngine.setDefaultFeeBps(500);
-        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
 
         (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient) =
-            store.quotePurchaseReceipt(listingId);
+            feeStore.quotePurchaseReceipt(listingId);
 
         assertEq(grossAmount, unitPrice);
         assertEq(protocolFee, unitPrice * 500 / 10_000);
         assertEq(sellerNet, unitPrice - protocolFee);
         assertEq(quotedFeeRecipient, feeRecipient);
-    }
-
-    function test_QuotePurchaseReceipt_BadQuoteOverCapReverts() public {
-        ReceiptBadQuoteRakeEngineMock badQuoteRakeEngine = new ReceiptBadQuoteRakeEngineMock();
-        RevealReceiptStore badStore = new RevealReceiptStore(address(badQuoteRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(badStore, address(this), title, resourceId);
-
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        badStore.quotePurchaseReceipt(listingId);
-    }
-
-    function test_QuotePurchaseReceipt_BadQuoteAboveGrossReverts() public {
-        ReceiptGrossOverflowQuoteRakeEngineMock grossOverflowQuoteRakeEngine =
-            new ReceiptGrossOverflowQuoteRakeEngineMock();
-        RevealReceiptStore grossOverflowStore =
-            new RevealReceiptStore(address(grossOverflowQuoteRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(grossOverflowStore, address(this), title, resourceId);
-
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        grossOverflowStore.quotePurchaseReceipt(listingId);
-    }
-
-    function test_QuotePurchaseReceipt_ZeroFeeRecipientWithPositiveFeeReverts() public {
-        ReceiptZeroRecipientQuoteRakeEngineMock zeroRecipientRakeEngine = new ReceiptZeroRecipientQuoteRakeEngineMock();
-        RevealReceiptStore zeroRecipientStore = new RevealReceiptStore(address(zeroRecipientRakeEngine), address(usdc));
-        uint256 listingId = _createListingAs(zeroRecipientStore, address(this), title, resourceId);
-
-        vm.expectRevert(RevealReceiptStore.BadState.selector);
-        zeroRecipientStore.quotePurchaseReceipt(listingId);
     }
 
     function test_GetListingAndReceipt_NotFoundRevert() public {
