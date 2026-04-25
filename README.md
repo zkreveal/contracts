@@ -15,12 +15,13 @@ v1 is Receipt Mode only.
 - v1 does not support refunds or reclaim flows
 - v1 does not support buyer public keys, encrypted payloads, content CIDs, inventory units, or delivery deadlines
 - v1 does not do dynamic on-chain pricing, oracle pricing, or marketplace fee routing
+- v1 does not expose cross-chain gateway adapter entrypoints
 
 ## Product Model
 
 `RevealReceiptStore` is the only required v1 product contract.
 
-Fixed-price receipt flow:
+### Fixed-price receipt flow
 
 1. Create a fixed-price listing with `createListing(title, resourceId, unitPrice)`.
 2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
@@ -28,7 +29,9 @@ Fixed-price receipt flow:
 4. Generate a unique off-chain `purchaseRef` for the buyer or order.
 5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
 
-Signed quote receipt flow:
+`purchaseReceipt` is the direct fixed-price purchase path. It does not support integrator fees.
+
+### Signed quote receipt flow
 
 1. Seller backend creates an order and generates a seller-scoped `purchaseRef`.
 2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
@@ -37,9 +40,27 @@ Signed quote receipt flow:
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
 6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
 
+Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
+
 Dynamic signed quotes may be signed either by the seller wallet directly or by an authorized quote signer. This lets a seller keep the settlement wallet separate from a backend hot key. The seller authorizes a signer once with `setQuoteSigner`, and that signer can create dynamic quotes for the seller's listings.
 
 Authorized quote signers can sign dynamic receipt quotes for any listing owned by that seller. Revoke compromised signers immediately with `setQuoteSigner(signer, false)`.
+
+### Integrator fees
+
+Integrator fees are supported only through seller-authorized signed quotes.
+
+This lets marketplaces, bots, checkout frontends, dashboards, and other seller tools monetize without changing seller settlement semantics. The seller or authorized quote signer includes `integratorFeeRecipient` and `integratorFeeAmount` in the signed quote.
+
+On purchase, zkReveal pays:
+
+1. protocol fee
+2. integrator fee, if present
+3. seller net amount
+
+`receipt.amount` remains the gross amount paid. Fee breakdowns should be indexed from `ProtocolFeePaid` and `IntegratorFeePaid`.
+
+## Signed Quote Typed Data
 
 TypeScript signing shape:
 
@@ -53,15 +74,15 @@ const domain = {
 
 const types = {
   SignedReceiptQuote: [
-    {name: "listingId", type: "uint256"},
-    {name: "seller", type: "address"},
-    {name: "buyer", type: "address"},
-    {name: "purchaseRef", type: "bytes32"},
-    {name: "amount", type: "uint256"},
-    {name: "settlementToken", type: "address"},
-    {name: "integratorFeeRecipient", type: "address"},
-    {name: "integratorFeeAmount", type: "uint256"},
-    {name: "expiresAt", type: "uint64"},
+    { name: "listingId", type: "uint256" },
+    { name: "seller", type: "address" },
+    { name: "buyer", type: "address" },
+    { name: "purchaseRef", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+    { name: "settlementToken", type: "address" },
+    { name: "integratorFeeRecipient", type: "address" },
+    { name: "integratorFeeAmount", type: "uint256" },
+    { name: "expiresAt", type: "uint64" },
   ],
 };
 
@@ -80,21 +101,29 @@ const message = {
 const signature = await signer.signTypedData(domain, types, message);
 ```
 
-The `seller` field in typed data remains the listing seller address even when the signature is produced by an authorized quote signer. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
-
-Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
-
-Integrator fees are supported only through seller-authorized signed quotes. This lets marketplaces, bots, and checkout providers monetize without changing seller settlement semantics. The seller or authorized quote signer includes `integratorFeeRecipient` and `integratorFeeAmount` in the signed quote. On purchase, zkReveal pays the protocol fee, pays the integrator fee, and sends the remaining net amount to the seller.
+The `seller` field in typed data is always the listing seller address, even when the signature is produced by an authorized quote signer. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
 
 The signed EIP-712 type is:
 
-`SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)`
+```text
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
+```
 
-`purchaseReceipt` remains a fixed-price direct purchase path and does not support integrator fees.
+## Purchase References
 
-Fulfillment remains off-chain in seller systems.
+`purchaseRef` is a seller-scoped `bytes32` reference used for replay protection and backend reconciliation.
 
-## Source Of Truth
+Do not put raw order IDs, usernames, phone numbers, emails, or private business data on-chain. Generate `purchaseRef` off-chain as an opaque hash-like value and keep the private mapping in your backend.
+
+Example conceptually:
+
+```text
+purchaseRef = hash(sellerAddress, internalOrderId, randomNonce)
+```
+
+The same `purchaseRef` can be reused by different sellers, but cannot be used twice by the same seller.
+
+## Source of Truth
 
 The `ReceiptPurchased` event is the source of truth for seller bots, backends, dashboards, and indexers.
 
@@ -102,8 +131,6 @@ Backends can reconcile purchases by:
 
 - `seller`
 - `purchaseRef`
-
-`purchaseRef` replay protection is seller-scoped, so the same reference can be reused by different sellers but not twice by the same seller.
 
 The contract also stores:
 
@@ -122,15 +149,15 @@ The v1 fee model is immutable at deployment:
 
 Constraints:
 
-- `protocolFeeBps` is capped at `1_000` basis points
+- `protocolFeeBps` is capped at `MAX_PROTOCOL_FEE_BPS = 1_000` basis points
 - `integratorFeeAmount` in signed quotes is capped at `MAX_INTEGRATOR_FEE_BPS = 1_000` basis points of the quoted `amount`
 - `feeRecipient` must be non-zero when `protocolFeeBps > 0`
+- `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
+- `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
 
 There is no dynamic fee mutation in v1.
-
-`receipt.amount` remains the gross amount paid. Fee breakdowns for signed quotes should be indexed from `ProtocolFeePaid` and `IntegratorFeePaid`.
 
 ## Contract Surface
 
@@ -149,6 +176,17 @@ Key functions:
 - `quotePurchaseReceipt`
 - `previewSignedReceiptPurchase`
 - `hashSignedReceiptQuote`
+- `getReceiptIdBySellerAndPurchaseRef`
+
+Key events:
+
+- `ListingCreated`
+- `ListingStatusChanged`
+- `ListingPriceChanged`
+- `QuoteSignerAuthorizationChanged`
+- `ReceiptPurchased`
+- `ProtocolFeePaid`
+- `IntegratorFeePaid`
 
 ## Development
 
@@ -186,4 +224,6 @@ forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
 
 ## Roadmap
 
-Future roadmap may include Protected Delivery or Escrow Mode, but those are not part of zkReveal v1.
+Future roadmap may include Protected Delivery, Escrow Mode, or gateway adapters for pay-from-other-chain UX, but those are not part of zkReveal v1.
+
+The v1 core is intentionally focused on receipt-mode settlement and off-chain fulfillment.
