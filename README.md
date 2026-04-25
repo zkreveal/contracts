@@ -32,7 +32,7 @@ Signed quote receipt flow:
 
 1. Seller backend creates an order and generates a seller-scoped `purchaseRef`.
 2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `settlementToken`, and `expiresAt`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `settlementToken`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
 6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
@@ -59,6 +59,8 @@ const types = {
     {name: "purchaseRef", type: "bytes32"},
     {name: "amount", type: "uint256"},
     {name: "settlementToken", type: "address"},
+    {name: "integratorFeeRecipient", type: "address"},
+    {name: "integratorFeeAmount", type: "uint256"},
     {name: "expiresAt", type: "uint64"},
   ],
 };
@@ -70,6 +72,8 @@ const message = {
   purchaseRef,
   amount,
   settlementToken,
+  integratorFeeRecipient, // zero address when no integrator fee is used
+  integratorFeeAmount, // zero when no integrator fee is used
   expiresAt,
 };
 
@@ -80,9 +84,13 @@ The `seller` field in typed data remains the listing seller address even when th
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
 
+Integrator fees are supported only through seller-authorized signed quotes. This lets marketplaces, bots, and checkout providers monetize without changing seller settlement semantics. The seller or authorized quote signer includes `integratorFeeRecipient` and `integratorFeeAmount` in the signed quote. On purchase, zkReveal pays the protocol fee, pays the integrator fee, and sends the remaining net amount to the seller.
+
 The signed EIP-712 type is:
 
-`SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)`
+`SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)`
+
+`purchaseReceipt` remains a fixed-price direct purchase path and does not support integrator fees.
 
 Fulfillment remains off-chain in seller systems.
 
@@ -115,11 +123,14 @@ The v1 fee model is immutable at deployment:
 Constraints:
 
 - `protocolFeeBps` is capped at `1_000` basis points
+- `integratorFeeAmount` in signed quotes is capped at `MAX_INTEGRATOR_FEE_BPS = 1_000` basis points of the quoted `amount`
 - `feeRecipient` must be non-zero when `protocolFeeBps > 0`
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
 
 There is no dynamic fee mutation in v1.
+
+`receipt.amount` remains the gross amount paid. Fee breakdowns for signed quotes should be indexed from `ProtocolFeePaid` and `IntegratorFeePaid`.
 
 ## Contract Surface
 

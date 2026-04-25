@@ -23,8 +23,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     string public constant EIP712_NAME = "RevealReceiptStore";
     string public constant EIP712_VERSION = "1";
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
+    uint16 public constant MAX_INTEGRATOR_FEE_BPS = 1_000;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
-        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)"
+        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
     );
 
     // -------------------------------------------------------------------------
@@ -63,12 +64,17 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     ///      EIP-712 hash. The quote may be signed by the seller directly or by a seller-authorized
     ///      quote signer managed with `setQuoteSigner`. Authorized quote signers can sign dynamic
     ///      quotes for any listing owned by that seller. `purchaseRef` is seller-scoped replay
-    ///      protection and `amount` is denominated in settlement token base units.
+    ///      protection and `amount` is denominated in settlement token base units. Integrator fee
+    ///      fields are optional, must be explicitly included in the seller-authorized EIP-712 quote,
+    ///      and are paid from the gross `amount`; the seller receives `amount - protocolFee -
+    ///      integratorFeeAmount`.
     struct SignedReceiptQuote {
         uint256 listingId;
         address buyer;
         bytes32 purchaseRef;
         uint256 amount;
+        address integratorFeeRecipient;
+        uint256 integratorFeeAmount;
         uint64 expiresAt;
     }
 
@@ -118,6 +124,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         uint256 indexed receiptId, uint256 indexed listingId, address indexed recipient, uint256 amount
     );
 
+    event IntegratorFeePaid(
+        uint256 indexed receiptId, uint256 indexed listingId, address indexed recipient, uint256 amount
+    );
+
     event QuoteSignerAuthorizationChanged(address indexed seller, address indexed signer, bool authorized);
 
     // -------------------------------------------------------------------------
@@ -133,6 +143,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     error QuoteExpired();
     error InvalidQuoteSigner();
     error QuoteBuyerMismatch();
+    error IntegratorFeeTooHigh();
 
     // -------------------------------------------------------------------------
     // Modifiers
@@ -172,7 +183,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         return grossAmount * protocolFeeBps / FeeMath.BPS_DENOMINATOR;
     }
 
-    function _quoteSettlement(uint256 grossAmount)
+    function _quoteProtocolSettlement(uint256 grossAmount)
         internal
         view
         returns (uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient)
@@ -180,6 +191,43 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         protocolFee = _quoteProtocolFee(grossAmount);
         sellerNet = grossAmount - protocolFee;
         quotedFeeRecipient = feeRecipient;
+    }
+
+    function _validateIntegratorFee(address recipient, uint256 integratorFeeAmount, uint256 grossAmount) internal pure {
+        if (integratorFeeAmount == 0) {
+            if (recipient != address(0)) revert InvalidParams();
+            return;
+        }
+
+        if (recipient == address(0)) revert InvalidParams();
+
+        uint256 maxIntegratorFee = grossAmount * MAX_INTEGRATOR_FEE_BPS / FeeMath.BPS_DENOMINATOR;
+        if (integratorFeeAmount > maxIntegratorFee) revert IntegratorFeeTooHigh();
+    }
+
+    function _distributeReceiptPurchaseProceeds(
+        uint256 receiptId,
+        uint256 listingId,
+        address seller,
+        uint256 amount,
+        address integratorFeeRecipient,
+        uint256 integratorFeeAmount
+    ) internal {
+        uint256 protocolFee = _quoteProtocolFee(amount);
+        if (protocolFee + integratorFeeAmount > amount) revert InvalidParams();
+        uint256 sellerNet = amount - protocolFee - integratorFeeAmount;
+
+        if (protocolFee > 0) {
+            settlementToken.safeTransfer(feeRecipient, protocolFee);
+            emit ProtocolFeePaid(receiptId, listingId, feeRecipient, protocolFee);
+        }
+
+        if (integratorFeeAmount > 0) {
+            settlementToken.safeTransfer(integratorFeeRecipient, integratorFeeAmount);
+            emit IntegratorFeePaid(receiptId, listingId, integratorFeeRecipient, integratorFeeAmount);
+        }
+
+        settlementToken.safeTransfer(seller, sellerNet);
     }
 
     function _hashSignedReceiptQuote(SignedReceiptQuote calldata quote, address seller)
@@ -197,6 +245,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
                     quote.purchaseRef,
                     quote.amount,
                     address(settlementToken),
+                    quote.integratorFeeRecipient,
+                    quote.integratorFeeAmount,
                     quote.expiresAt
                 )
             )
@@ -226,6 +276,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         if (quote.buyer != expectedBuyer) revert QuoteBuyerMismatch();
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
         if (quote.amount == 0) revert InvalidParams();
+        _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
         if (purchaseRefUsed[listing.seller][quote.purchaseRef]) revert PurchaseRefAlreadyUsed();
 
@@ -245,7 +296,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         address receiptBuyer,
         uint256 amount,
         bytes32 purchaseRef,
-        string memory resourceId
+        string memory resourceId,
+        address integratorFeeRecipient,
+        uint256 integratorFeeAmount
     ) internal returns (uint256 receiptId) {
         settlementToken.safeTransferFrom(payer, address(this), amount);
 
@@ -266,14 +319,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         receiptsBySeller[seller].push(receiptId);
         receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
 
-        uint256 protocolFee = _quoteProtocolFee(amount);
-
-        if (protocolFee > 0) {
-            settlementToken.safeTransfer(feeRecipient, protocolFee);
-            emit ProtocolFeePaid(receiptId, listingId, feeRecipient, protocolFee);
-        }
-
-        settlementToken.safeTransfer(seller, amount - protocolFee);
+        _distributeReceiptPurchaseProceeds(
+            receiptId, listingId, seller, amount, integratorFeeRecipient, integratorFeeAmount
+        );
 
         emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, receiptBuyer, amount, resourceId);
     }
@@ -362,7 +410,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         if (purchaseRefUsed[listing.seller][purchaseRef]) revert PurchaseRefAlreadyUsed();
 
         return _settleReceiptPurchase(
-            listingId, listing.seller, msg.sender, msg.sender, listing.unitPrice, purchaseRef, listing.resourceId
+            listingId,
+            listing.seller,
+            msg.sender,
+            msg.sender,
+            listing.unitPrice,
+            purchaseRef,
+            listing.resourceId,
+            address(0),
+            0
         );
     }
 
@@ -370,6 +426,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     /// @dev The signed amount overrides the current listing unit price and settles immediately on success.
     ///      Quotes are valid only while `block.timestamp < quote.expiresAt`.
     ///      The recovered signer must be the listing seller or a signer authorized by the seller.
+    ///      The signed quote may also include an optional integrator fee paid from the gross amount.
     function purchaseSignedReceipt(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
         external
         nonReentrant
@@ -379,7 +436,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, msg.sender);
 
         return _settleReceiptPurchase(
-            quote.listingId, listing.seller, msg.sender, msg.sender, quote.amount, quote.purchaseRef, listing.resourceId
+            quote.listingId,
+            listing.seller,
+            msg.sender,
+            msg.sender,
+            quote.amount,
+            quote.purchaseRef,
+            listing.resourceId,
+            quote.integratorFeeRecipient,
+            quote.integratorFeeAmount
         );
     }
 
@@ -396,7 +461,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     {
         Listing storage listing = listings[listingId];
         grossAmount = listing.unitPrice;
-        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteSettlement(grossAmount);
+        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteProtocolSettlement(grossAmount);
     }
 
     /// @notice Returns the EIP-712 digest for a seller-authorized signed receipt quote.
@@ -412,7 +477,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         return _hashSignedReceiptQuote(quote, listing.seller);
     }
 
-    /// @notice Preview gross amount, protocol fee, seller net, fee recipient, seller, and resourceId for a signed quote.
+    /// @notice Preview gross amount, protocol fee, integrator fee, seller net, fee recipients, seller, and resourceId
+    ///         for a signed quote.
     /// @dev This performs fee math only. It does not verify the seller signature, buyer match, quote expiry,
     ///      listing active status, or purchaseRef replay status.
     function previewSignedReceiptPurchase(SignedReceiptQuote calldata quote)
@@ -422,8 +488,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         returns (
             uint256 grossAmount,
             uint256 protocolFee,
+            uint256 integratorFee,
             uint256 sellerNet,
             address quotedFeeRecipient,
+            address integratorFeeRecipient,
             address seller,
             string memory resourceId
         )
@@ -431,9 +499,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         Listing storage listing = listings[quote.listingId];
         if (quote.amount == 0) revert InvalidParams();
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
 
         grossAmount = quote.amount;
-        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteSettlement(grossAmount);
+        protocolFee = _quoteProtocolFee(grossAmount);
+        integratorFee = quote.integratorFeeAmount;
+        if (protocolFee + integratorFee > grossAmount) revert InvalidParams();
+        sellerNet = grossAmount - protocolFee - integratorFee;
+        quotedFeeRecipient = feeRecipient;
+        integratorFeeRecipient = quote.integratorFeeRecipient;
         seller = listing.seller;
         resourceId = listing.resourceId;
     }

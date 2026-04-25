@@ -33,7 +33,15 @@ contract RevealReceiptStoreHarness is RevealReceiptStore {
         Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer);
 
         return _settleReceiptPurchase(
-            quote.listingId, listing.seller, payer, expectedBuyer, quote.amount, quote.purchaseRef, listing.resourceId
+            quote.listingId,
+            listing.seller,
+            payer,
+            expectedBuyer,
+            quote.amount,
+            quote.purchaseRef,
+            listing.resourceId,
+            address(0),
+            0
         );
     }
 }
@@ -144,9 +152,27 @@ contract RevealReceiptStoreTest is Test {
         uint256 amount,
         uint64 expiresAt
     ) internal pure returns (RevealReceiptStore.SignedReceiptQuote memory quote) {
+        quote = _makeSignedReceiptQuoteWithIntegrator(listingId, quoteBuyer, ref, amount, address(0), 0, expiresAt);
+    }
+
+    function _makeSignedReceiptQuoteWithIntegrator(
+        uint256 listingId,
+        address quoteBuyer,
+        bytes32 ref,
+        uint256 amount,
+        address integratorFeeRecipient,
+        uint256 integratorFeeAmount,
+        uint64 expiresAt
+    ) internal pure returns (RevealReceiptStore.SignedReceiptQuote memory quote) {
         quote = RevealReceiptStore.SignedReceiptQuote({
-                listingId: listingId, buyer: quoteBuyer, purchaseRef: ref, amount: amount, expiresAt: expiresAt
-            });
+            listingId: listingId,
+            buyer: quoteBuyer,
+            purchaseRef: ref,
+            amount: amount,
+            integratorFeeRecipient: integratorFeeRecipient,
+            integratorFeeAmount: integratorFeeAmount,
+            expiresAt: expiresAt
+        });
     }
 
     function _signSignedReceiptQuote(
@@ -196,6 +222,8 @@ contract RevealReceiptStoreTest is Test {
                 quote.purchaseRef,
                 quote.amount,
                 address(targetStore.settlementToken()),
+                quote.integratorFeeRecipient,
+                quote.integratorFeeAmount,
                 quote.expiresAt
             )
         );
@@ -278,7 +306,7 @@ contract RevealReceiptStoreTest is Test {
         assertEq(
             store.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
             keccak256(
-                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)"
+                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
             )
         );
     }
@@ -425,8 +453,10 @@ contract RevealReceiptStoreTest is Test {
     function test_PurchaseReceipt_PaysProtocolFeeAndSellerNet() public {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
         uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 integratorBalanceBefore = usdc.balanceOf(integrator);
         uint256 protocolFee = unitPrice * 500 / 10_000;
 
         vm.startPrank(buyer);
@@ -441,6 +471,7 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(integrator), integratorBalanceBefore);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (unitPrice - protocolFee));
         assertEq(usdc.balanceOf(address(feeStore)), 0);
     }
@@ -566,12 +597,14 @@ contract RevealReceiptStoreTest is Test {
     function test_PurchaseSignedReceipt_DirectSellerSignatureStillWorks() public {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
         bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
         uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 integratorBalanceBefore = usdc.balanceOf(integrator);
         uint256 protocolFee = quotedAmount * 500 / 10_000;
 
         vm.startPrank(buyer);
@@ -595,6 +628,54 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(integrator), integratorBalanceBefore);
+        assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    function test_PurchaseSignedReceipt_PaysIntegratorFeeAndSellerNet() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * 200 / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 integratorBalanceBefore = usdc.balanceOf(integrator);
+        uint256 protocolFee = quotedAmount * 500 / 10_000;
+
+        vm.startPrank(buyer);
+        usdc.approve(address(feeStore), quotedAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.IntegratorFeePaid(1, listingId, integrator, integratorFeeAmount);
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, resourceId);
+
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+
+        RevealReceiptStore.Receipt memory receipt = feeStore.getReceipt(receiptId);
+        assertEq(receiptId, 1);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(receipt.buyer, buyer);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.purchaseRef, purchaseRef);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(integrator), integratorBalanceBefore + integratorFeeAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee - integratorFeeAmount));
         assertEq(usdc.balanceOf(address(feeStore)), 0);
     }
 
@@ -783,6 +864,55 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
     }
 
+    function test_PurchaseSignedReceipt_IntegratorRecipientWithoutFeeReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId, buyer, purchaseRef, quotedAmount, address(0x1A7E), 0, uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_IntegratorFeeWithoutRecipientReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId, buyer, purchaseRef, quotedAmount, address(0), 1, uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_IntegratorFeeTooHighReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 integratorFeeAmount = quotedAmount * 1001 / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            address(0x1A7E),
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.IntegratorFeeTooHigh.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
     function test_PurchaseSignedReceipt_ZeroPurchaseRefReverts() public {
         uint256 listingId = _createListingAsSeller();
         RevealReceiptStore.SignedReceiptQuote memory quote =
@@ -899,16 +1029,56 @@ contract RevealReceiptStoreTest is Test {
         (
             uint256 grossAmount,
             uint256 protocolFee,
+            uint256 integratorFee,
             uint256 sellerNet,
             address quotedFeeRecipient,
+            address quotedIntegratorFeeRecipient,
             address quotedSeller,
             string memory quotedResourceId
         ) = feeStore.previewSignedReceiptPurchase(quote);
 
         assertEq(grossAmount, quotedAmount);
         assertEq(protocolFee, quotedAmount * 500 / 10_000);
+        assertEq(integratorFee, 0);
         assertEq(sellerNet, quotedAmount - protocolFee);
         assertEq(quotedFeeRecipient, feeRecipient);
+        assertEq(quotedIntegratorFeeRecipient, address(0));
+        assertEq(quotedSeller, seller);
+        assertEq(quotedResourceId, resourceId);
+    }
+
+    function test_PreviewSignedReceiptPurchase_WithIntegratorFeeReturnsExpectedValues() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * 200 / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        (
+            uint256 grossAmount,
+            uint256 protocolFee,
+            uint256 integratorFee,
+            uint256 sellerNet,
+            address quotedFeeRecipient,
+            address quotedIntegratorFeeRecipient,
+            address quotedSeller,
+            string memory quotedResourceId
+        ) = feeStore.previewSignedReceiptPurchase(quote);
+
+        assertEq(grossAmount, quotedAmount);
+        assertEq(protocolFee, quotedAmount * 500 / 10_000);
+        assertEq(integratorFee, integratorFeeAmount);
+        assertEq(sellerNet, quotedAmount - protocolFee - integratorFeeAmount);
+        assertEq(quotedFeeRecipient, feeRecipient);
+        assertEq(quotedIntegratorFeeRecipient, integrator);
         assertEq(quotedSeller, seller);
         assertEq(quotedResourceId, resourceId);
     }
@@ -928,6 +1098,43 @@ contract RevealReceiptStoreTest is Test {
             _makeSignedReceiptQuote(listingId, buyer, bytes32(0), quotedAmount, uint64(block.timestamp + 1 days));
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
+    function test_PreviewSignedReceiptPurchase_IntegratorRecipientWithoutFeeReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId, buyer, purchaseRef, quotedAmount, address(0x1A7E), 0, uint64(block.timestamp + 1 days)
+        );
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
+    function test_PreviewSignedReceiptPurchase_IntegratorFeeWithoutRecipientReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId, buyer, purchaseRef, quotedAmount, address(0), 1, uint64(block.timestamp + 1 days)
+        );
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
+    function test_PreviewSignedReceiptPurchase_IntegratorFeeTooHighReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 integratorFeeAmount = quotedAmount * 1001 / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            address(0x1A7E),
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        vm.expectRevert(RevealReceiptStore.IntegratorFeeTooHigh.selector);
         store.previewSignedReceiptPurchase(quote);
     }
 
