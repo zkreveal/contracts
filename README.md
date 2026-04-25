@@ -1,49 +1,112 @@
-# Reveal Protocol
+# zkReveal v1
 
-This branch is focused on `RevealReceiptStore`, a receipt-only settlement contract for mainnet deployment.
+zkReveal v1 is a minimal on-chain receipt and settlement layer for digital sellers.
 
-Sellers create listings with a `title`, `resourceId`, and `unitPrice`. Buyers purchase those listings using seller-issued `purchaseRef` values. Payment settles immediately in the configured ERC-20 settlement token, and the contract records a canonical on-chain receipt for downstream reconciliation.
+Buyer pays.  
+Seller gets paid.  
+Your backend receives a verifiable on-chain purchase receipt.
 
-## Core Contract
+Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately and emits a `ReceiptPurchased` event that seller bots, APIs, dashboards, or indexers can use to fulfill orders off-chain.
 
-- `src/RevealReceiptStore.sol`
+v1 is Receipt Mode only.
 
-Key storage:
+- v1 is not Delivery Mode
+- v1 is not Escrow Mode
+- v1 does not support refunds or reclaim flows
+- v1 does not support buyer public keys, encrypted payloads, content CIDs, inventory units, or delivery deadlines
+- v1 does not do dynamic on-chain pricing, oracle pricing, or marketplace fee routing
 
-- `listings[listingId]`
+## Product Model
+
+`RevealReceiptStore` is the only required v1 product contract.
+
+Fixed-price receipt flow:
+
+1. Create a fixed-price listing with `createListing(title, resourceId, unitPrice)`.
+2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
+3. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
+4. Generate a unique off-chain `purchaseRef` for the buyer or order.
+5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
+
+Signed quote receipt flow:
+
+1. Seller backend creates an order and generates a seller-scoped `purchaseRef`.
+2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `settlementToken`, and `expiresAt`.
+4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
+5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
+6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
+
+Dynamic signed quotes may be signed either by the seller wallet directly or by an authorized quote signer. This lets a seller keep the settlement wallet separate from a backend hot key. The seller authorizes a signer once with `setQuoteSigner`, and that signer can create dynamic quotes for the seller's listings.
+
+Authorized quote signers can sign dynamic receipt quotes for any listing owned by that seller. Revoke compromised signers immediately with `setQuoteSigner(signer, false)`.
+
+TypeScript signing shape:
+
+```ts
+const domain = {
+  name: "RevealReceiptStore",
+  version: "1",
+  chainId,
+  verifyingContract: receiptStoreAddress,
+};
+
+const types = {
+  SignedReceiptQuote: [
+    {name: "listingId", type: "uint256"},
+    {name: "seller", type: "address"},
+    {name: "buyer", type: "address"},
+    {name: "purchaseRef", type: "bytes32"},
+    {name: "amount", type: "uint256"},
+    {name: "settlementToken", type: "address"},
+    {name: "expiresAt", type: "uint64"},
+  ],
+};
+
+const message = {
+  listingId,
+  seller, // always the listing seller address
+  buyer,
+  purchaseRef,
+  amount,
+  settlementToken,
+  expiresAt,
+};
+
+const signature = await signer.signTypedData(domain, types, message);
+```
+
+The `seller` field in typed data remains the listing seller address even when the signature is produced by an authorized quote signer. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
+
+Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
+
+The signed EIP-712 type is:
+
+`SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)`
+
+Fulfillment remains off-chain in seller systems.
+
+## Source Of Truth
+
+The `ReceiptPurchased` event is the source of truth for seller bots, backends, dashboards, and indexers.
+
+Backends can reconcile purchases by:
+
+- `seller`
+- `purchaseRef`
+
+`purchaseRef` replay protection is seller-scoped, so the same reference can be reused by different sellers but not twice by the same seller.
+
+The contract also stores:
+
+- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
 - `receipts[receiptId]`
-- `listingsBySeller[seller]`
 - `receiptsByBuyer[buyer]`
 - `receiptsBySeller[seller]`
-- `purchaseRefUsed[seller][purchaseRef]`
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
-
-## Receipt Flow
-
-Seller flow:
-
-1. Call `createListing(title, resourceId, unitPrice)`.
-2. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
-3. Generate a seller-scoped `purchaseRef` off-chain for a buyer order.
-
-Buyer flow:
-
-1. Approve the ERC-20 settlement token to the store.
-2. Call `purchaseReceipt(listingId, purchaseRef)`.
-3. Read the stored receipt on-chain or index the `ReceiptPurchased` event.
-
-Settlement behavior:
-
-- buyer funds are pulled with `transferFrom`
-- protocol fee is computed in-contract from immutable deployment config
-- protocol fee is sent to `feeRecipient` when `protocolFeeBps > 0`
-- seller receives the remaining settlement amount immediately
 
 ## Fee Model
 
-`RevealReceiptStore` no longer depends on a separate `RakeEngine`.
-
-Deployment config is now:
+The v1 fee model is immutable at deployment:
 
 - `settlementToken`
 - `feeRecipient`
@@ -53,35 +116,63 @@ Constraints:
 
 - `protocolFeeBps` is capped at `1_000` basis points
 - `feeRecipient` must be non-zero when `protocolFeeBps > 0`
+- `settlementToken` should be a standard ERC-20 such as USDC
+- fee-on-transfer and rebasing tokens are not supported
 
-## Listing Identity
+There is no dynamic fee mutation in v1.
 
-- `listingId` is the canonical on-chain identifier.
-- `resourceId` is seller-defined semantic metadata for integrations.
-- `purchaseRef` must be unique per seller.
+## Contract Surface
 
-Recommended off-chain identifiers:
+Core contract:
 
-- canonical listing identity: `(chainId, contractAddress, listingId)`
-- semantic listing identity: `(chainId, contractAddress, seller, resourceId)`
-- canonical receipt lookup: `(chainId, contractAddress, seller, purchaseRef)`
+- `src/RevealReceiptStore.sol`
+
+Key functions:
+
+- `createListing`
+- `setQuoteSigner`
+- `setListingActive`
+- `setListingPrice`
+- `purchaseReceipt`
+- `purchaseSignedReceipt`
+- `quotePurchaseReceipt`
+- `previewSignedReceiptPurchase`
+- `hashSignedReceiptQuote`
 
 ## Development
 
-Common commands:
+```bash
+forge fmt
+forge test
+```
+
+If Foundry crashes during trace signature lookup in your local environment, retry with:
 
 ```bash
-forge build
-forge test
+forge test --offline --suppress-successful-traces
 ```
 
 ## Deployment
 
-The deploy script at `script/Deploy.s.sol` expects these environment variables:
+The v1 deploy script deploys only `RevealReceiptStore`.
 
-- `DEPLOYER_PRIVATE_KEY`
+Required envs:
+
+- `RPC_URL`
+- `PRIVATE_KEY`
 - `SETTLEMENT_TOKEN`
-- `RECEIPT_PROTOCOL_FEE_BPS`
-- `TREASURY_MULTISIG` when `RECEIPT_PROTOCOL_FEE_BPS > 0`
+- `FEE_RECIPIENT`
+- `PROTOCOL_FEE_BPS`
 
-The included `.env.example` also contains RPC and Arbiscan placeholders for Arbitrum deployments.
+`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
+
+Typical flow:
+
+```bash
+source .env
+forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
+```
+
+## Roadmap
+
+Future roadmap may include Protected Delivery or Escrow Mode, but those are not part of zkReveal v1.

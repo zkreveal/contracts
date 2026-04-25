@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {FeeMath} from "./FeeMath.sol";
@@ -11,14 +13,31 @@ import {FeeMath} from "./FeeMath.sol";
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
 /// @dev Sellers create listings, buyers pay with seller-issued purchase references,
 /// and settlement completes immediately with an on-chain receipt record.
-contract RevealReceiptStore is ReentrancyGuard {
+contract RevealReceiptStore is EIP712, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
+
+    string public constant EIP712_NAME = "RevealReceiptStore";
+    string public constant EIP712_VERSION = "1";
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
+    bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
+        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,uint64 expiresAt)"
+    );
+
+    // -------------------------------------------------------------------------
+    // Immutables
+    // -------------------------------------------------------------------------
 
     IERC20 public immutable settlementToken;
     address public immutable feeRecipient;
     uint16 public immutable protocolFeeBps;
+
+    // -------------------------------------------------------------------------
+    // Structs
+    // -------------------------------------------------------------------------
 
     struct Listing {
         address seller;
@@ -39,6 +58,24 @@ contract RevealReceiptStore is ReentrancyGuard {
         uint64 issuedAt;
     }
 
+    /// @notice Seller-authorized dynamic checkout quote for a receipt purchase.
+    /// @dev `seller` and `settlementToken` are derived by the contract but are still included in the
+    ///      EIP-712 hash. The quote may be signed by the seller directly or by a seller-authorized
+    ///      quote signer managed with `setQuoteSigner`. Authorized quote signers can sign dynamic
+    ///      quotes for any listing owned by that seller. `purchaseRef` is seller-scoped replay
+    ///      protection and `amount` is denominated in settlement token base units.
+    struct SignedReceiptQuote {
+        uint256 listingId;
+        address buyer;
+        bytes32 purchaseRef;
+        uint256 amount;
+        uint64 expiresAt;
+    }
+
+    // -------------------------------------------------------------------------
+    // Storage
+    // -------------------------------------------------------------------------
+
     uint256 public nextListingId = 1;
     uint256 public nextReceiptId = 1;
 
@@ -47,10 +84,15 @@ contract RevealReceiptStore is ReentrancyGuard {
     mapping(address => uint256[]) public listingsBySeller;
     mapping(address => uint256[]) public receiptsByBuyer;
     mapping(address => uint256[]) public receiptsBySeller;
+    mapping(address seller => mapping(address signer => bool)) public authorizedQuoteSigners;
     /// @dev Seller-issued `purchaseRef` values are generated off-chain and enforced as unique per seller.
     mapping(address => mapping(bytes32 => bool)) public purchaseRefUsed;
     /// @dev Deterministic seller-scoped reconciliation helper for off-chain generated refs. Returns 0 if unused.
     mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
+
+    // -------------------------------------------------------------------------
+    // Events
+    // -------------------------------------------------------------------------
 
     event ListingCreated(
         uint256 indexed listingId, address indexed seller, string title, string resourceId, uint256 unitPrice
@@ -58,13 +100,17 @@ contract RevealReceiptStore is ReentrancyGuard {
 
     event ListingStatusChanged(uint256 indexed listingId, address indexed seller, bool active);
 
+    event ListingPriceChanged(
+        uint256 indexed listingId, address indexed seller, uint256 oldUnitPrice, uint256 newUnitPrice
+    );
+
     event ReceiptPurchased(
         uint256 indexed receiptId,
-        uint256 indexed listingId,
-        address indexed buyer,
-        address seller,
+        address indexed seller,
+        bytes32 indexed purchaseRef,
+        uint256 listingId,
+        address buyer,
         uint256 amount,
-        bytes32 purchaseRef,
         string resourceId
     );
 
@@ -72,12 +118,25 @@ contract RevealReceiptStore is ReentrancyGuard {
         uint256 indexed receiptId, uint256 indexed listingId, address indexed recipient, uint256 amount
     );
 
+    event QuoteSignerAuthorizationChanged(address indexed seller, address indexed signer, bool authorized);
+
+    // -------------------------------------------------------------------------
+    // Errors
+    // -------------------------------------------------------------------------
+
     error ListingNotFound();
     error ReceiptNotFound();
     error NotListingSeller();
     error ListingInactive();
     error InvalidParams();
     error PurchaseRefAlreadyUsed();
+    error QuoteExpired();
+    error InvalidQuoteSigner();
+    error QuoteBuyerMismatch();
+
+    // -------------------------------------------------------------------------
+    // Modifiers
+    // -------------------------------------------------------------------------
 
     modifier listingExists(uint256 listingId) {
         _listingExists(listingId);
@@ -89,7 +148,13 @@ contract RevealReceiptStore is ReentrancyGuard {
         _;
     }
 
-    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_) {
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+
+    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_)
+        EIP712(EIP712_NAME, EIP712_VERSION)
+    {
         if (settlementToken_ == address(0)) revert InvalidParams();
         if (protocolFeeBps_ > MAX_PROTOCOL_FEE_BPS) revert InvalidParams();
         if (protocolFeeBps_ > 0 && feeRecipient_ == address(0)) revert InvalidParams();
@@ -99,8 +164,43 @@ contract RevealReceiptStore is ReentrancyGuard {
         protocolFeeBps = protocolFeeBps_;
     }
 
+    // -------------------------------------------------------------------------
+    // Internal Helpers
+    // -------------------------------------------------------------------------
+
     function _quoteProtocolFee(uint256 grossAmount) internal view returns (uint256) {
         return grossAmount * protocolFeeBps / FeeMath.BPS_DENOMINATOR;
+    }
+
+    function _quoteSettlement(uint256 grossAmount)
+        internal
+        view
+        returns (uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient)
+    {
+        protocolFee = _quoteProtocolFee(grossAmount);
+        sellerNet = grossAmount - protocolFee;
+        quotedFeeRecipient = feeRecipient;
+    }
+
+    function _hashSignedReceiptQuote(SignedReceiptQuote calldata quote, address seller)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    SIGNED_RECEIPT_QUOTE_TYPEHASH,
+                    quote.listingId,
+                    seller,
+                    quote.buyer,
+                    quote.purchaseRef,
+                    quote.amount,
+                    address(settlementToken),
+                    quote.expiresAt
+                )
+            )
+        );
     }
 
     function _listingExists(uint256 listingId) internal view {
@@ -114,6 +214,84 @@ contract RevealReceiptStore is ReentrancyGuard {
     function _onlyListingSeller(uint256 listingId) internal view {
         if (listings[listingId].seller != msg.sender) revert NotListingSeller();
     }
+
+    function _verifySignedReceiptQuote(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
+        internal
+        view
+        returns (Listing storage listing)
+    {
+        listing = listings[quote.listingId];
+
+        if (!listing.active) revert ListingInactive();
+        if (quote.buyer != msg.sender) revert QuoteBuyerMismatch();
+        if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        if (quote.amount == 0) revert InvalidParams();
+        if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
+        if (purchaseRefUsed[listing.seller][quote.purchaseRef]) revert PurchaseRefAlreadyUsed();
+
+        bytes32 digest = _hashSignedReceiptQuote(quote, listing.seller);
+        address signer = ECDSA.recover(digest, sellerSignature);
+        if (signer != listing.seller && !authorizedQuoteSigners[listing.seller][signer]) {
+            revert InvalidQuoteSigner();
+        }
+    }
+
+    function _settleReceiptPurchase(
+        uint256 listingId,
+        address seller,
+        address buyer,
+        uint256 amount,
+        bytes32 purchaseRef,
+        string memory resourceId
+    ) internal returns (uint256 receiptId) {
+        settlementToken.safeTransferFrom(buyer, address(this), amount);
+
+        purchaseRefUsed[seller][purchaseRef] = true;
+
+        receiptId = nextReceiptId++;
+
+        Receipt storage receipt = receipts[receiptId];
+        receipt.exists = true;
+        receipt.listingId = listingId;
+        receipt.seller = seller;
+        receipt.buyer = buyer;
+        receipt.amount = amount;
+        receipt.purchaseRef = purchaseRef;
+        receipt.issuedAt = uint64(block.timestamp);
+
+        receiptsByBuyer[buyer].push(receiptId);
+        receiptsBySeller[seller].push(receiptId);
+        receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
+
+        uint256 protocolFee = _quoteProtocolFee(amount);
+
+        if (protocolFee > 0) {
+            settlementToken.safeTransfer(feeRecipient, protocolFee);
+            emit ProtocolFeePaid(receiptId, listingId, feeRecipient, protocolFee);
+        }
+
+        settlementToken.safeTransfer(seller, amount - protocolFee);
+
+        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, buyer, amount, resourceId);
+    }
+
+    // -------------------------------------------------------------------------
+    // Seller Configuration Functions
+    // -------------------------------------------------------------------------
+
+    /// @notice Authorize or revoke a signer that can create dynamic receipt quotes for the caller's listings.
+    /// @dev Authorized quote signers can sign dynamic receipt quotes for any listing owned by `msg.sender`.
+    function setQuoteSigner(address signer, bool authorized) external {
+        if (signer == address(0)) revert InvalidParams();
+
+        authorizedQuoteSigners[msg.sender][signer] = authorized;
+
+        emit QuoteSignerAuthorizationChanged(msg.sender, signer, authorized);
+    }
+
+    // -------------------------------------------------------------------------
+    // Seller Listing Functions
+    // -------------------------------------------------------------------------
 
     /// @notice Create a seller-owned listing for Receipt Mode purchases.
     /// @dev `unitPrice` is denominated in settlement token base units.
@@ -147,10 +325,27 @@ contract RevealReceiptStore is ReentrancyGuard {
         emit ListingStatusChanged(listingId, msg.sender, active);
     }
 
+    /// @notice Update the default fixed listing price of a seller-owned listing.
+    /// @dev `newUnitPrice` is denominated in settlement token base units.
+    ///      Signed receipt quotes may use custom amounts independent of `listing.unitPrice`.
+    function setListingPrice(uint256 listingId, uint256 newUnitPrice) external listingExists(listingId) {
+        _onlyListingSeller(listingId);
+        if (newUnitPrice == 0) revert InvalidParams();
+
+        Listing storage listing = listings[listingId];
+        uint256 oldUnitPrice = listing.unitPrice;
+        listing.unitPrice = newUnitPrice;
+
+        emit ListingPriceChanged(listingId, msg.sender, oldUnitPrice, newUnitPrice);
+    }
+
+    // -------------------------------------------------------------------------
+    // Purchase Functions
+    // -------------------------------------------------------------------------
+
     /// @notice Purchase a Receipt Mode listing using a seller-issued off-chain purchase reference.
     /// @dev `purchaseRef` is a seller-issued off-chain purchase intent reference and must be unique per seller.
-    ///      No on-chain pre-registration happens, no escrow is created, payment settles immediately,
-    ///      and fulfillment remains entirely off-chain in the seller's own backend or dashboard.
+    ///      Payment settles immediately and fulfillment remains entirely off-chain in seller systems.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef)
         external
         nonReentrant
@@ -163,38 +358,31 @@ contract RevealReceiptStore is ReentrancyGuard {
         if (purchaseRef == bytes32(0)) revert InvalidParams();
         if (purchaseRefUsed[listing.seller][purchaseRef]) revert PurchaseRefAlreadyUsed();
 
-        settlementToken.safeTransferFrom(msg.sender, address(this), listing.unitPrice);
-
-        purchaseRefUsed[listing.seller][purchaseRef] = true;
-
-        receiptId = nextReceiptId++;
-
-        Receipt storage receipt = receipts[receiptId];
-        receipt.exists = true;
-        receipt.listingId = listingId;
-        receipt.seller = listing.seller;
-        receipt.buyer = msg.sender;
-        receipt.amount = listing.unitPrice;
-        receipt.purchaseRef = purchaseRef;
-        receipt.issuedAt = uint64(block.timestamp);
-
-        receiptsByBuyer[msg.sender].push(receiptId);
-        receiptsBySeller[listing.seller].push(receiptId);
-        receiptIdBySellerAndPurchaseRef[listing.seller][purchaseRef] = receiptId;
-
-        uint256 protocolFee = _quoteProtocolFee(listing.unitPrice);
-
-        if (protocolFee > 0) {
-            settlementToken.safeTransfer(feeRecipient, protocolFee);
-            emit ProtocolFeePaid(receiptId, listingId, feeRecipient, protocolFee);
-        }
-
-        settlementToken.safeTransfer(listing.seller, listing.unitPrice - protocolFee);
-
-        emit ReceiptPurchased(
-            receiptId, listingId, msg.sender, listing.seller, listing.unitPrice, purchaseRef, listing.resourceId
+        return _settleReceiptPurchase(
+            listingId, listing.seller, msg.sender, listing.unitPrice, purchaseRef, listing.resourceId
         );
     }
+
+    /// @notice Purchase a Receipt Mode listing using a seller-authorized EIP-712 quote.
+    /// @dev The signed amount overrides the current listing unit price and settles immediately on success.
+    ///      Quotes are valid only while `block.timestamp < quote.expiresAt`.
+    ///      The recovered signer must be the listing seller or a signer authorized by the seller.
+    function purchaseSignedReceipt(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
+        external
+        nonReentrant
+        listingExists(quote.listingId)
+        returns (uint256 receiptId)
+    {
+        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature);
+
+        return _settleReceiptPurchase(
+            quote.listingId, listing.seller, msg.sender, quote.amount, quote.purchaseRef, listing.resourceId
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Preview / Hash Functions
+    // -------------------------------------------------------------------------
 
     /// @notice Quote gross amount, protocol fee, seller net, and fee recipient for a receipt purchase.
     function quotePurchaseReceipt(uint256 listingId)
@@ -205,10 +393,51 @@ contract RevealReceiptStore is ReentrancyGuard {
     {
         Listing storage listing = listings[listingId];
         grossAmount = listing.unitPrice;
-        protocolFee = _quoteProtocolFee(grossAmount);
-        quotedFeeRecipient = feeRecipient;
-        sellerNet = grossAmount - protocolFee;
+        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteSettlement(grossAmount);
     }
+
+    /// @notice Returns the EIP-712 digest for a seller-authorized signed receipt quote.
+    /// @dev The digest includes the derived seller, settlement token, current chain ID, and this contract address.
+    /// It may be signed by the listing seller or by a quote signer authorized by that seller.
+    function hashSignedReceiptQuote(SignedReceiptQuote calldata quote)
+        public
+        view
+        listingExists(quote.listingId)
+        returns (bytes32)
+    {
+        Listing storage listing = listings[quote.listingId];
+        return _hashSignedReceiptQuote(quote, listing.seller);
+    }
+
+    /// @notice Preview gross amount, protocol fee, seller net, fee recipient, seller, and resourceId for a signed quote.
+    /// @dev This performs fee math only. It does not verify the seller signature, buyer match, quote expiry,
+    ///      listing active status, or purchaseRef replay status.
+    function previewSignedReceiptPurchase(SignedReceiptQuote calldata quote)
+        external
+        view
+        listingExists(quote.listingId)
+        returns (
+            uint256 grossAmount,
+            uint256 protocolFee,
+            uint256 sellerNet,
+            address quotedFeeRecipient,
+            address seller,
+            string memory resourceId
+        )
+    {
+        Listing storage listing = listings[quote.listingId];
+        if (quote.amount == 0) revert InvalidParams();
+        if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+
+        grossAmount = quote.amount;
+        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteSettlement(grossAmount);
+        seller = listing.seller;
+        resourceId = listing.resourceId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Getters
+    // -------------------------------------------------------------------------
 
     function getListingsBySeller(address seller) external view returns (uint256[] memory) {
         return listingsBySeller[seller];

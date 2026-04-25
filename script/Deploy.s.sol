@@ -9,36 +9,35 @@ contract Deploy is Script {
     uint256 internal constant MAX_PROTOCOL_FEE_BPS = 1_000;
 
     function run() external {
-        uint256 pk = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
         address settlementToken = vm.envAddress("SETTLEMENT_TOKEN");
-        address treasuryMultisig = vm.envOr("TREASURY_MULTISIG", address(0));
-        uint256 receiptProtocolFeeBpsRaw = vm.envUint("RECEIPT_PROTOCOL_FEE_BPS");
+        address feeRecipient = vm.envOr("FEE_RECIPIENT", address(0));
+        uint256 protocolFeeBpsRaw = vm.envUint("PROTOCOL_FEE_BPS");
 
-        require(pk != 0, "DEPLOYER_PRIVATE_KEY is zero");
+        require(pk != 0, "PRIVATE_KEY is zero");
         require(settlementToken != address(0), "SETTLEMENT_TOKEN is zero");
-        require(receiptProtocolFeeBpsRaw <= MAX_PROTOCOL_FEE_BPS, "RECEIPT_PROTOCOL_FEE_BPS too high");
-        if (receiptProtocolFeeBpsRaw > 0) {
-            require(treasuryMultisig != address(0), "TREASURY_MULTISIG is zero");
+        require(protocolFeeBpsRaw <= MAX_PROTOCOL_FEE_BPS, "PROTOCOL_FEE_BPS too high");
+        if (protocolFeeBpsRaw > 0) {
+            require(feeRecipient != address(0), "FEE_RECIPIENT is zero");
         }
 
         // casting is safe because the value is capped to MAX_PROTOCOL_FEE_BPS (1_000)
         // forge-lint: disable-next-line(unsafe-typecast)
-        uint16 receiptProtocolFeeBps = uint16(receiptProtocolFeeBpsRaw);
+        uint16 protocolFeeBps = uint16(protocolFeeBpsRaw);
 
         console2.log("=== zkReveal ReceiptStore Deployment ===");
         console2.log("ChainId:", block.chainid);
 
         vm.startBroadcast(pk);
-        RevealReceiptStore receiptStore =
-            new RevealReceiptStore(settlementToken, treasuryMultisig, receiptProtocolFeeBps);
+        RevealReceiptStore receiptStore = new RevealReceiptStore(settlementToken, feeRecipient, protocolFeeBps);
         vm.stopBroadcast();
 
         console2.log("ChainId:", block.chainid);
         console2.log("Deployer:", deployer);
         console2.log("SettlementToken:", settlementToken);
-        console2.log("TreasuryMultisig:", treasuryMultisig);
-        console2.log("ReceiptProtocolFeeBps:", receiptProtocolFeeBps);
+        console2.log("FeeRecipient:", feeRecipient);
+        console2.log("ProtocolFeeBps:", protocolFeeBps);
         console2.log("ReceiptStore:", address(receiptStore));
     }
 }

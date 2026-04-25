@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
@@ -19,25 +20,39 @@ contract ReceiptMockUSDC is ERC20 {
 }
 
 contract RevealReceiptStoreTest is Test {
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    uint256 internal constant SELLER_PK = 0xA11CE;
+    uint256 internal constant SELLER2_PK = 0xABCD;
+    uint256 internal constant QUOTE_SIGNER_PK = 0xBEEF;
+    uint256 internal constant ATTACKER_PK = 0xD00D;
+
     ReceiptMockUSDC usdc;
     RevealReceiptStore store;
 
-    address seller = address(0xA11CE);
-    address seller2 = address(0xABCD);
+    address seller;
+    address seller2;
+    address quoteSigner;
     address buyer = address(0xB0B);
     address buyer2 = address(0xCAFE);
-    address attacker = address(0xD00D);
+    address attacker;
     address feeRecipient = address(0xFEE);
 
     string title = "Pro Dataset";
     string resourceId = "dataset/btc-signals-mar-2026";
     uint256 unitPrice = 100_000_000;
+    uint256 updatedUnitPrice = 125_000_000;
+    uint256 quotedAmount = 250_000_000;
     bytes32 purchaseRef = keccak256("purchase-1");
     bytes32 purchaseRef2 = keccak256("purchase-2");
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
         store = new RevealReceiptStore(address(usdc), feeRecipient, 0);
+        seller = vm.addr(SELLER_PK);
+        seller2 = vm.addr(SELLER2_PK);
+        quoteSigner = vm.addr(QUOTE_SIGNER_PK);
+        attacker = vm.addr(ATTACKER_PK);
 
         usdc.mint(buyer, 1_000_000_000);
         usdc.mint(buyer2, 1_000_000_000);
@@ -76,6 +91,13 @@ contract RevealReceiptStoreTest is Test {
         listingId = _createListingAs(seller, title, resourceId);
     }
 
+    function _setQuoteSigner(RevealReceiptStore targetStore, address sellerAccount, address signer, bool authorized)
+        internal
+    {
+        vm.prank(sellerAccount);
+        targetStore.setQuoteSigner(signer, authorized);
+    }
+
     function _purchaseReceiptAs(RevealReceiptStore targetStore, uint256 listingId, address who, bytes32 ref)
         internal
         returns (uint256 receiptId)
@@ -88,6 +110,72 @@ contract RevealReceiptStoreTest is Test {
 
     function _purchaseReceiptAs(uint256 listingId, address who, bytes32 ref) internal returns (uint256 receiptId) {
         receiptId = _purchaseReceiptAs(store, listingId, who, ref);
+    }
+
+    function _makeSignedReceiptQuote(
+        uint256 listingId,
+        address quoteBuyer,
+        bytes32 ref,
+        uint256 amount,
+        uint64 expiresAt
+    ) internal pure returns (RevealReceiptStore.SignedReceiptQuote memory quote) {
+        quote = RevealReceiptStore.SignedReceiptQuote({
+                listingId: listingId, buyer: quoteBuyer, purchaseRef: ref, amount: amount, expiresAt: expiresAt
+            });
+    }
+
+    function _signSignedReceiptQuote(
+        RevealReceiptStore targetStore,
+        uint256 signerPk,
+        RevealReceiptStore.SignedReceiptQuote memory quote
+    ) internal view returns (bytes memory signature) {
+        bytes32 digest = targetStore.hashSignedReceiptQuote(quote);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
+        signature = abi.encodePacked(r, s, v);
+    }
+
+    function _purchaseSignedReceiptAs(
+        RevealReceiptStore targetStore,
+        address who,
+        RevealReceiptStore.SignedReceiptQuote memory quote,
+        bytes memory sellerSignature
+    ) internal returns (uint256 receiptId) {
+        vm.startPrank(who);
+        usdc.approve(address(targetStore), quote.amount);
+        receiptId = targetStore.purchaseSignedReceipt(quote, sellerSignature);
+        vm.stopPrank();
+    }
+
+    function _expectedSignedReceiptQuoteDigest(
+        RevealReceiptStore targetStore,
+        RevealReceiptStore.SignedReceiptQuote memory quote
+    ) internal view returns (bytes32) {
+        RevealReceiptStore.Listing memory listing = targetStore.getListing(quote.listingId);
+
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("RevealReceiptStore")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(targetStore)
+            )
+        );
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                targetStore.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
+                quote.listingId,
+                listing.seller,
+                quote.buyer,
+                quote.purchaseRef,
+                quote.amount,
+                address(targetStore.settlementToken()),
+                quote.expiresAt
+            )
+        );
+
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
     function test_ListingCreated_Emits() public {
@@ -189,6 +277,63 @@ contract RevealReceiptStoreTest is Test {
         store.setListingActive(listingId, false);
     }
 
+    function test_SetListingPrice_UpdatesPriceAndEmits() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectEmit(true, true, false, true);
+        emit RevealReceiptStore.ListingPriceChanged(listingId, seller, unitPrice, updatedUnitPrice);
+
+        vm.prank(seller);
+        store.setListingPrice(listingId, updatedUnitPrice);
+
+        RevealReceiptStore.Listing memory listing = store.getListing(listingId);
+        assertEq(listing.unitPrice, updatedUnitPrice);
+    }
+
+    function test_SetListingPrice_NonSellerReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(attacker);
+        vm.expectRevert(RevealReceiptStore.NotListingSeller.selector);
+        store.setListingPrice(listingId, updatedUnitPrice);
+    }
+
+    function test_SetListingPrice_ZeroPriceReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.setListingPrice(listingId, 0);
+    }
+
+    function test_SetQuoteSigner_AuthorizesSigner() public {
+        vm.expectEmit(true, true, false, true);
+        emit RevealReceiptStore.QuoteSignerAuthorizationChanged(seller, quoteSigner, true);
+
+        vm.prank(seller);
+        store.setQuoteSigner(quoteSigner, true);
+
+        assertEq(store.authorizedQuoteSigners(seller, quoteSigner), true);
+    }
+
+    function test_SetQuoteSigner_RevokesSigner() public {
+        _setQuoteSigner(store, seller, quoteSigner, true);
+
+        vm.expectEmit(true, true, false, true);
+        emit RevealReceiptStore.QuoteSignerAuthorizationChanged(seller, quoteSigner, false);
+
+        vm.prank(seller);
+        store.setQuoteSigner(quoteSigner, false);
+
+        assertEq(store.authorizedQuoteSigners(seller, quoteSigner), false);
+    }
+
+    function test_SetQuoteSigner_ZeroSignerRejected() public {
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.setQuoteSigner(address(0), true);
+    }
+
     function test_PurchaseReceipt_SettlesImmediatelyAndStoresReceipt() public {
         uint256 listingId = _createListingAsSeller();
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
@@ -201,7 +346,7 @@ contract RevealReceiptStoreTest is Test {
         usdc.approve(address(store), unitPrice);
 
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, listingId, buyer, seller, unitPrice, purchaseRef, resourceId);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, unitPrice, resourceId);
 
         uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
@@ -246,7 +391,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, listingId, buyer, seller, unitPrice, purchaseRef, resourceId);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, unitPrice, resourceId);
 
         feeStore.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
@@ -254,6 +399,29 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (unitPrice - protocolFee));
         assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    function test_PurchaseReceipt_ChargesUpdatedPriceAfterPriceUpdate() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+
+        vm.prank(seller);
+        store.setListingPrice(listingId, updatedUnitPrice);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), updatedUnitPrice);
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, updatedUnitPrice, resourceId);
+
+        uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
+        vm.stopPrank();
+
+        RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
+        assertEq(receipt.amount, updatedUnitPrice);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - updatedUnitPrice);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + updatedUnitPrice);
     }
 
     function test_PurchaseReceipt_ZeroPurchaseRefReverts() public {
@@ -314,6 +482,375 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
     }
 
+    function test_PurchaseSignedReceipt_AuthorizedSignerCanSignDynamicQuote() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        _setQuoteSigner(feeStore, seller, quoteSigner, true);
+
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(feeStore, QUOTE_SIGNER_PK, quote);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 protocolFee = quotedAmount * 500 / 10_000;
+
+        vm.startPrank(buyer);
+        usdc.approve(address(feeStore), quotedAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, resourceId);
+
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+
+        RevealReceiptStore.Receipt memory receipt = feeStore.getReceipt(receiptId);
+        assertEq(receiptId, 1);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(receipt.buyer, buyer);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.purchaseRef, purchaseRef);
+        assertEq(feeStore.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    function test_PurchaseSignedReceipt_DirectSellerSignatureStillWorks() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 protocolFee = quotedAmount * 500 / 10_000;
+
+        vm.startPrank(buyer);
+        usdc.approve(address(feeStore), quotedAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, resourceId);
+
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+
+        RevealReceiptStore.Receipt memory receipt = feeStore.getReceipt(receiptId);
+        assertEq(receiptId, 1);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(receipt.buyer, buyer);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.purchaseRef, purchaseRef);
+        assertEq(feeStore.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    function test_PurchaseSignedReceipt_QuoteAmountOverridesListingUnitPrice() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
+        uint256 protocolFee = quotedAmount * 500 / 10_000;
+
+        uint256 receiptId = _purchaseSignedReceiptAs(feeStore, buyer, quote, signature);
+
+        RevealReceiptStore.Listing memory listing = feeStore.getListing(listingId);
+        RevealReceiptStore.Receipt memory receipt = feeStore.getReceipt(receiptId);
+        assertEq(listing.unitPrice, unitPrice);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(usdc.balanceOf(feeRecipient), protocolFee);
+    }
+
+    function test_PurchaseSignedReceipt_UnauthorizedSignerFails() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, ATTACKER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_RevokedSignerQuoteFails() public {
+        uint256 listingId = _createListingAsSeller();
+        _setQuoteSigner(store, seller, quoteSigner, true);
+
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, QUOTE_SIGNER_PK, quote);
+
+        _setQuoteSigner(store, seller, quoteSigner, false);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_AuthorizationCheckedAtPurchaseTime() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        _setQuoteSigner(feeStore, seller, quoteSigner, true);
+
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(feeStore, QUOTE_SIGNER_PK, quote);
+
+        _setQuoteSigner(feeStore, seller, quoteSigner, false);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(feeStore), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidQuoteSigner.selector);
+        feeStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_WrongBuyerReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(attacker);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.QuoteBuyerMismatch.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_ExpiredQuoteReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp - 1));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.QuoteExpired.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_QuoteExpiringExactlyNowReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, 0);
+        quote.expiresAt = uint64(block.timestamp);
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.QuoteExpired.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_QuoteExpiringInFutureSucceeds() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, 0);
+        quote.expiresAt = uint64(block.timestamp + 1);
+        bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 protocolFee = quotedAmount * 500 / 10_000;
+
+        vm.startPrank(buyer);
+        usdc.approve(address(feeStore), quotedAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ProtocolFeePaid(1, listingId, feeRecipient, protocolFee);
+        vm.expectEmit(true, true, true, true);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, resourceId);
+
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+
+        RevealReceiptStore.Receipt memory receipt = feeStore.getReceipt(receiptId);
+        assertEq(receiptId, 1);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+    }
+
+    function test_PurchaseSignedReceipt_ZeroQuoteAmountReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, 0, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), 0);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_ZeroPurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, bytes32(0), quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_DuplicatePurchaseRefSameSellerReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+
+        assertEq(receiptId, 1);
+    }
+
+    function test_PurchaseSignedReceipt_InactiveListingReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, false);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.ListingInactive.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_AuthorizationIsSellerScoped() public {
+        uint256 sellerAListingId = _createListingAs(seller, title, resourceId);
+        uint256 sellerBListingId = _createListingAs(store, seller2, "Seller Two", "dataset/eth-signals-apr-2026");
+        _setQuoteSigner(store, seller, quoteSigner, true);
+
+        RevealReceiptStore.SignedReceiptQuote memory sellerBQuote = _makeSignedReceiptQuote(
+            sellerBListingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days)
+        );
+        bytes memory sellerBSignature = _signSignedReceiptQuote(store, QUOTE_SIGNER_PK, sellerBQuote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(sellerBQuote, sellerBSignature);
+        vm.stopPrank();
+
+        RevealReceiptStore.SignedReceiptQuote memory sellerAQuote = _makeSignedReceiptQuote(
+            sellerAListingId, buyer, purchaseRef2, quotedAmount, uint64(block.timestamp + 1 days)
+        );
+        bytes memory sellerASignature = _signSignedReceiptQuote(store, QUOTE_SIGNER_PK, sellerAQuote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, sellerAQuote, sellerASignature);
+        assertEq(receiptId, 1);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef2), receiptId);
+    }
+
+    function test_PurchaseSignedReceipt_AllowsSamePurchaseRefAcrossDifferentSellers() public {
+        uint256 listingId1 = _createListingAs(seller, title, resourceId);
+        uint256 listingId2 = _createListingAs(store, seller2, "Seller Two", "dataset/eth-signals-apr-2026");
+        RevealReceiptStore.SignedReceiptQuote memory quote1 =
+            _makeSignedReceiptQuote(listingId1, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        RevealReceiptStore.SignedReceiptQuote memory quote2 =
+            _makeSignedReceiptQuote(listingId2, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature1 = _signSignedReceiptQuote(store, SELLER_PK, quote1);
+        bytes memory signature2 = _signSignedReceiptQuote(store, SELLER2_PK, quote2);
+
+        uint256 receiptId1 = _purchaseSignedReceiptAs(store, buyer, quote1, signature1);
+        uint256 receiptId2 = _purchaseSignedReceiptAs(store, buyer, quote2, signature2);
+
+        assertEq(receiptId1, 1);
+        assertEq(receiptId2, 2);
+        assertEq(store.purchaseRefUsed(seller, purchaseRef), true);
+        assertEq(store.purchaseRefUsed(seller2, purchaseRef), true);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), receiptId2);
+    }
+
+    function test_HashSignedReceiptQuote_MatchesTestGeneratedEIP712Digest() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+
+        bytes32 digest = store.hashSignedReceiptQuote(quote);
+        bytes32 expectedDigest = _expectedSignedReceiptQuoteDigest(store, quote);
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+        address recoveredSigner = ECDSA.recover(digest, signature);
+
+        assertEq(digest, expectedDigest);
+        assertEq(recoveredSigner, seller);
+    }
+
+    function test_PreviewSignedReceiptPurchase_ReturnsExpectedValues() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+
+        (
+            uint256 grossAmount,
+            uint256 protocolFee,
+            uint256 sellerNet,
+            address quotedFeeRecipient,
+            address quotedSeller,
+            string memory quotedResourceId
+        ) = feeStore.previewSignedReceiptPurchase(quote);
+
+        assertEq(grossAmount, quotedAmount);
+        assertEq(protocolFee, quotedAmount * 500 / 10_000);
+        assertEq(sellerNet, quotedAmount - protocolFee);
+        assertEq(quotedFeeRecipient, feeRecipient);
+        assertEq(quotedSeller, seller);
+        assertEq(quotedResourceId, resourceId);
+    }
+
+    function test_PreviewSignedReceiptPurchase_ZeroAmountReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, 0, uint64(block.timestamp + 1 days));
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
+    function test_PreviewSignedReceiptPurchase_ZeroPurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, bytes32(0), quotedAmount, uint64(block.timestamp + 1 days));
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
     function test_QuotePurchaseReceipt_ReturnsGrossFeeAndNet() public {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
@@ -324,6 +861,22 @@ contract RevealReceiptStoreTest is Test {
         assertEq(grossAmount, unitPrice);
         assertEq(protocolFee, unitPrice * 500 / 10_000);
         assertEq(sellerNet, unitPrice - protocolFee);
+        assertEq(quotedFeeRecipient, feeRecipient);
+    }
+
+    function test_QuotePurchaseReceipt_ReturnsUpdatedPriceAfterPriceUpdate() public {
+        RevealReceiptStore feeStore = _deployStore(500);
+        uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
+
+        vm.prank(seller);
+        feeStore.setListingPrice(listingId, updatedUnitPrice);
+
+        (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient) =
+            feeStore.quotePurchaseReceipt(listingId);
+
+        assertEq(grossAmount, updatedUnitPrice);
+        assertEq(protocolFee, updatedUnitPrice * 500 / 10_000);
+        assertEq(sellerNet, updatedUnitPrice - protocolFee);
         assertEq(quotedFeeRecipient, feeRecipient);
     }
 
