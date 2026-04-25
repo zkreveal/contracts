@@ -5,26 +5,25 @@ out/
 # Broadcast / deployment artifacts
 broadcast/
 
-# OS / Editor
-.DS_Store
-.idea/
-.vscode/
-
 # Env / secrets
 .env
 .env.*
 !.env.example
-
 
 # Build artifacts
 artifacts/
 build/
 dist/
 coverage/
+lcov.info
 
 # Node
 node_modules/
 
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
 
 # Logs
 *.log
