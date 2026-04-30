@@ -33,6 +33,15 @@ contract RevealReceiptStoreHarness is RevealReceiptStore {
     ) external nonReentrant listingExists(quote.listingId) returns (uint256 receiptId) {
         Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer);
 
+        return _settleVerifiedSignedReceiptQuote(listing, quote, payer, expectedBuyer);
+    }
+
+    function _settleVerifiedSignedReceiptQuote(
+        Listing storage listing,
+        SignedReceiptQuote calldata quote,
+        address payer,
+        address expectedBuyer
+    ) internal returns (uint256 receiptId) {
         return _settleReceiptPurchase(
             quote.listingId,
             listing.seller,
@@ -41,8 +50,8 @@ contract RevealReceiptStoreHarness is RevealReceiptStore {
             quote.amount,
             quote.purchaseRef,
             listing.resourceId,
-            address(0),
-            0
+            quote.integratorFeeRecipient,
+            quote.integratorFeeAmount
         );
     }
 }
@@ -1061,6 +1070,35 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(address(feeStore)), 0);
     }
 
+    function test_PurchaseSignedReceipt_MaxProtocolAndMaxIntegratorFeeSettles() public {
+        RevealReceiptStore maxFeeStore = _deployStore(uint16(store.MAX_PROTOCOL_FEE_BPS()));
+        uint256 listingId = _createListingAs(maxFeeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * maxFeeStore.MAX_INTEGRATOR_FEE_BPS() / 10_000;
+        uint256 protocolFee = quotedAmount * maxFeeStore.MAX_PROTOCOL_FEE_BPS() / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(maxFeeStore, SELLER_PK, quote);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 integratorBalanceBefore = usdc.balanceOf(integrator);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(maxFeeStore, buyer, quote, signature);
+
+        assertEq(receiptId, 1);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
+        assertEq(usdc.balanceOf(integrator), integratorBalanceBefore + integratorFeeAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + quotedAmount - protocolFee - integratorFeeAmount);
+        assertEq(usdc.balanceOf(address(maxFeeStore)), 0);
+    }
+
     function test_PurchaseSignedReceipt_QuoteAmountOverridesListingUnitPrice() public {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
@@ -1527,6 +1565,78 @@ contract RevealReceiptStoreTest is Test {
         assertEq(quotedResourceId, resourceId);
     }
 
+    function test_PreviewSignedReceiptPurchase_ZeroProtocolFeeWithIntegratorFeeReturnsExpectedValues() public {
+        uint256 listingId = _createListingAsSeller();
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * 200 / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        (
+            uint256 grossAmount,
+            uint256 protocolFee,
+            uint256 integratorFee,
+            uint256 sellerNet,
+            address quotedFeeRecipient,
+            address quotedIntegratorFeeRecipient,
+            address quotedSeller,
+            string memory quotedResourceId
+        ) = store.previewSignedReceiptPurchase(quote);
+
+        assertEq(grossAmount, quotedAmount);
+        assertEq(protocolFee, 0);
+        assertEq(integratorFee, integratorFeeAmount);
+        assertEq(sellerNet, quotedAmount - integratorFeeAmount);
+        assertEq(quotedFeeRecipient, feeRecipient);
+        assertEq(quotedIntegratorFeeRecipient, integrator);
+        assertEq(quotedSeller, seller);
+        assertEq(quotedResourceId, resourceId);
+    }
+
+    function test_PreviewSignedReceiptPurchase_MaxProtocolAndMaxIntegratorFeeReturnsExpectedValues() public {
+        RevealReceiptStore maxFeeStore = _deployStore(uint16(store.MAX_PROTOCOL_FEE_BPS()));
+        uint256 listingId = _createListingAs(maxFeeStore, seller, title, resourceId);
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * maxFeeStore.MAX_INTEGRATOR_FEE_BPS() / 10_000;
+        uint256 protocolFee = quotedAmount * maxFeeStore.MAX_PROTOCOL_FEE_BPS() / 10_000;
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        (
+            uint256 grossAmount,
+            uint256 quotedProtocolFee,
+            uint256 quotedIntegratorFee,
+            uint256 sellerNet,
+            address quotedFeeRecipient,
+            address quotedIntegratorFeeRecipient,
+            address quotedSeller,
+            string memory quotedResourceId
+        ) = maxFeeStore.previewSignedReceiptPurchase(quote);
+
+        assertEq(grossAmount, quotedAmount);
+        assertEq(quotedProtocolFee, protocolFee);
+        assertEq(quotedIntegratorFee, integratorFeeAmount);
+        assertEq(sellerNet, quotedAmount - protocolFee - integratorFeeAmount);
+        assertEq(quotedFeeRecipient, feeRecipient);
+        assertEq(quotedIntegratorFeeRecipient, integrator);
+        assertEq(quotedSeller, seller);
+        assertEq(quotedResourceId, resourceId);
+    }
+
     function test_PreviewSignedReceiptPurchase_ZeroAmountReverts() public {
         uint256 listingId = _createListingAsSeller();
         RevealReceiptStore.SignedReceiptQuote memory quote =
@@ -1592,6 +1702,18 @@ contract RevealReceiptStoreTest is Test {
         assertEq(grossAmount, unitPrice);
         assertEq(protocolFee, unitPrice * 500 / 10_000);
         assertEq(sellerNet, unitPrice - protocolFee);
+        assertEq(quotedFeeRecipient, feeRecipient);
+    }
+
+    function test_QuotePurchaseReceipt_ZeroProtocolFeeReturnsGrossAsSellerNet() public {
+        uint256 listingId = _createListingAsSeller();
+
+        (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient) =
+            store.quotePurchaseReceipt(listingId);
+
+        assertEq(grossAmount, unitPrice);
+        assertEq(protocolFee, 0);
+        assertEq(sellerNet, unitPrice);
         assertEq(quotedFeeRecipient, feeRecipient);
     }
 
