@@ -88,6 +88,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint64 expiresAt;
     }
 
+    struct RakeQuote {
+        uint256 grossAmount;
+        uint256 protocolFee;
+        uint256 integratorFee;
+        uint256 sellerNet;
+        address protocolFeeRecipient;
+        address integratorFeeRecipient;
+    }
+
     // -------------------------------------------------------------------------
     // Storage
     // -------------------------------------------------------------------------
@@ -230,16 +239,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         return grossAmount * protocolFeeBps / FeeMath.BPS_DENOMINATOR;
     }
 
-    function _quoteProtocolSettlement(uint256 grossAmount)
-        internal
-        view
-        returns (uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient)
-    {
-        protocolFee = _quoteProtocolFee(grossAmount);
-        sellerNet = grossAmount - protocolFee;
-        quotedFeeRecipient = feeRecipient;
-    }
-
     function _validateIntegratorFee(address recipient, uint256 integratorFeeAmount, uint256 grossAmount) internal pure {
         if (integratorFeeAmount == 0) {
             if (recipient != address(0)) revert InvalidParams();
@@ -252,6 +251,27 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (integratorFeeAmount > maxIntegratorFee) revert IntegratorFeeTooHigh();
     }
 
+    function _quoteRake(uint256 grossAmount, address integratorFeeRecipient, uint256 integratorFeeAmount)
+        internal
+        view
+        returns (RakeQuote memory quote)
+    {
+        _validatePurchaseAmount(grossAmount);
+        _validateIntegratorFee(integratorFeeRecipient, integratorFeeAmount, grossAmount);
+
+        uint256 protocolFee = _quoteProtocolFee(grossAmount);
+        if (protocolFee + integratorFeeAmount > grossAmount) revert InvalidParams();
+
+        quote = RakeQuote({
+            grossAmount: grossAmount,
+            protocolFee: protocolFee,
+            integratorFee: integratorFeeAmount,
+            sellerNet: grossAmount - protocolFee - integratorFeeAmount,
+            protocolFeeRecipient: feeRecipient,
+            integratorFeeRecipient: integratorFeeRecipient
+        });
+    }
+
     function _distributeReceiptPurchaseProceeds(
         uint256 receiptId,
         uint256 listingId,
@@ -260,21 +280,19 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         address integratorFeeRecipient,
         uint256 integratorFeeAmount
     ) internal {
-        uint256 protocolFee = _quoteProtocolFee(amount);
-        if (protocolFee + integratorFeeAmount > amount) revert InvalidParams();
-        uint256 sellerNet = amount - protocolFee - integratorFeeAmount;
+        RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
 
-        if (protocolFee > 0) {
-            settlementToken.safeTransfer(feeRecipient, protocolFee);
-            emit ProtocolFeePaid(receiptId, listingId, feeRecipient, protocolFee);
+        if (rake.protocolFee > 0) {
+            settlementToken.safeTransfer(rake.protocolFeeRecipient, rake.protocolFee);
+            emit ProtocolFeePaid(receiptId, listingId, rake.protocolFeeRecipient, rake.protocolFee);
         }
 
-        if (integratorFeeAmount > 0) {
-            settlementToken.safeTransfer(integratorFeeRecipient, integratorFeeAmount);
-            emit IntegratorFeePaid(receiptId, listingId, integratorFeeRecipient, integratorFeeAmount);
+        if (rake.integratorFee > 0) {
+            settlementToken.safeTransfer(rake.integratorFeeRecipient, rake.integratorFee);
+            emit IntegratorFeePaid(receiptId, listingId, rake.integratorFeeRecipient, rake.integratorFee);
         }
 
-        settlementToken.safeTransfer(seller, sellerNet);
+        settlementToken.safeTransfer(seller, rake.sellerNet);
     }
 
     function _hashSignedReceiptQuote(SignedReceiptQuote calldata quote, address seller)
@@ -548,8 +566,11 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         returns (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient)
     {
         Listing storage listing = listings[listingId];
-        grossAmount = listing.unitPrice;
-        (protocolFee, sellerNet, quotedFeeRecipient) = _quoteProtocolSettlement(grossAmount);
+        RakeQuote memory rake = _quoteRake(listing.unitPrice, address(0), 0);
+        grossAmount = rake.grossAmount;
+        protocolFee = rake.protocolFee;
+        sellerNet = rake.sellerNet;
+        quotedFeeRecipient = rake.protocolFeeRecipient;
     }
 
     /// @notice Returns the EIP-712 digest for a seller-authorized signed receipt quote.
@@ -585,17 +606,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         )
     {
         Listing storage listing = listings[quote.listingId];
-        _validatePurchaseAmount(quote.amount);
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
-        _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
+        RakeQuote memory rake = _quoteRake(quote.amount, quote.integratorFeeRecipient, quote.integratorFeeAmount);
 
-        grossAmount = quote.amount;
-        protocolFee = _quoteProtocolFee(grossAmount);
-        integratorFee = quote.integratorFeeAmount;
-        if (protocolFee + integratorFee > grossAmount) revert InvalidParams();
-        sellerNet = grossAmount - protocolFee - integratorFee;
-        quotedFeeRecipient = feeRecipient;
-        integratorFeeRecipient = quote.integratorFeeRecipient;
+        grossAmount = rake.grossAmount;
+        protocolFee = rake.protocolFee;
+        integratorFee = rake.integratorFee;
+        sellerNet = rake.sellerNet;
+        quotedFeeRecipient = rake.protocolFeeRecipient;
+        integratorFeeRecipient = rake.integratorFeeRecipient;
         seller = listing.seller;
         resourceId = listing.resourceId;
     }
