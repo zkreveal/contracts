@@ -238,13 +238,30 @@ Optional envs:
 - `PROTOCOL_OWNER` to override the default owner; otherwise the deployer is used
 
 `FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
+If `PROTOCOL_FEE_BPS=0`, `FEE_RECIPIENT` may also be omitted and the deploy script will default it to the zero address.
 
 Typical flow:
 
 ```bash
-source .env
+export RPC_URL="https://your-arbitrum-sepolia-rpc"
+export PRIVATE_KEY="0xYOUR_PRIVATE_KEY"
+export SETTLEMENT_TOKEN="0xYOUR_ERC20_ON_ARBITRUM_SEPOLIA"
+export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"
+export PROTOCOL_FEE_BPS="0"
+# optional:
+export PROTOCOL_OWNER="0xYOUR_OWNER"
+
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
 ```
+
+Current Arbitrum Sepolia deployment as of 2026-04-30:
+
+- chain ID: `421614`
+- contract: `0x55743A4e0836cc3c3f6189fC19e1e19a7F3c84c8`
+- deploy tx: `0xdf54cc481b7992d7b3016dd832384ca63dcbe0eb75b5b5e15a45ab2eaba1bb9a`
+- settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
+- owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
+- protocol fee bps: `0`
 
 ## Roadmap
 

@@ -24,7 +24,7 @@ contract Deploy is Script {
             require(feeRecipient != address(0), "FEE_RECIPIENT is zero");
         }
 
-        // casting is safe because the value is capped to MAX_PROTOCOL_FEE_BPS (1_000)
+        // Safe because the value is capped to MAX_PROTOCOL_FEE_BPS above.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint16 protocolFeeBps = uint16(protocolFeeBpsRaw);
 
