@@ -31,6 +31,7 @@ contract RevealReceiptStoreHarness is RevealReceiptStore {
         address payer,
         address expectedBuyer
     ) external nonReentrant listingExists(quote.listingId) returns (uint256 receiptId) {
+        if (purchasesPaused) revert PurchasesPaused();
         Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer);
 
         return _settleVerifiedSignedReceiptQuote(listing, quote, payer, expectedBuyer);
@@ -430,6 +431,21 @@ contract RevealReceiptStoreTest is Test {
         assertEq(store.owner(), address(this));
     }
 
+    function test_Ownable2Step_TransferOwnershipRequiresAcceptance() public {
+        address newOwner = address(0xB055);
+
+        store.transferOwnership(newOwner);
+
+        assertEq(store.owner(), address(this));
+        assertEq(store.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        store.acceptOwnership();
+
+        assertEq(store.owner(), newOwner);
+        assertEq(store.pendingOwner(), address(0));
+    }
+
     function test_PauseSetters_NonOwnerReverts() public {
         vm.startPrank(attacker);
         _expectOnlyOwnerRevert(attacker);
@@ -578,12 +594,13 @@ contract RevealReceiptStoreTest is Test {
         store.setListingPrice(listingId, updatedUnitPrice);
     }
 
-    function test_SetListingPrice_ZeroPriceReverts() public {
+    function test_SetListingPrice_BelowMinReverts() public {
         uint256 listingId = _createListingAsSeller();
+        uint256 belowMinPurchaseAmount = store.MIN_PURCHASE_AMOUNT() - 1;
 
         vm.prank(seller);
         vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
-        store.setListingPrice(listingId, 0);
+        store.setListingPrice(listingId, belowMinPurchaseAmount);
     }
 
     function test_SetListingPrice_AtMinSucceeds() public {
@@ -1213,6 +1230,49 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(address(harnessStore)), 0);
     }
 
+    function test_PurchaseSignedReceipt_InternalPayerCanDifferFromReceiptBuyerWithIntegratorFee() public {
+        RevealReceiptStoreHarness harnessStore = _deployHarnessStore(500);
+        uint256 listingId = _createListingAs(harnessStore, seller, title, resourceId);
+        address gatewayAdapter = address(0xADA702);
+        address integrator = address(0x1A7E);
+        uint256 integratorFeeAmount = quotedAmount * 200 / 10_000;
+
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            quotedAmount,
+            integrator,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        bytes memory signature = _signSignedReceiptQuote(harnessStore, SELLER_PK, quote);
+
+        usdc.mint(gatewayAdapter, quotedAmount);
+
+        vm.prank(gatewayAdapter);
+        usdc.approve(address(harnessStore), quotedAmount);
+
+        vm.prank(gatewayAdapter);
+        uint256 receiptId =
+            harnessStore.purchaseSignedReceiptForPayerAndExpectedBuyer(quote, signature, gatewayAdapter, buyer);
+
+        RevealReceiptStore.Receipt memory receipt = harnessStore.getReceipt(receiptId);
+
+        assertEq(receiptId, 1);
+        assertEq(receipt.buyer, buyer);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.amount, quotedAmount);
+        assertEq(receipt.purchaseRef, purchaseRef);
+        assertEq(usdc.balanceOf(gatewayAdapter), 0);
+        assertEq(usdc.balanceOf(buyer), 10_000_000_000);
+        assertEq(usdc.balanceOf(feeRecipient), quotedAmount * 500 / 10_000);
+        assertEq(usdc.balanceOf(integrator), integratorFeeAmount);
+        assertEq(usdc.balanceOf(seller), quotedAmount - (quotedAmount * 500 / 10_000) - integratorFeeAmount);
+        assertEq(usdc.balanceOf(address(harnessStore)), 0);
+    }
+
     function test_PurchaseSignedReceipt_ExpiredQuoteReverts() public {
         uint256 listingId = _createListingAsSeller();
         RevealReceiptStore.SignedReceiptQuote memory quote =
@@ -1641,6 +1701,16 @@ contract RevealReceiptStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, 0, uint64(block.timestamp + 1 days));
+
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
+        store.previewSignedReceiptPurchase(quote);
+    }
+
+    function test_PreviewSignedReceiptPurchase_AmountAboveMaxReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, store.MAX_PURCHASE_AMOUNT() + 1, uint64(block.timestamp + 1 days)
+        );
 
         vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
         store.previewSignedReceiptPurchase(quote);
