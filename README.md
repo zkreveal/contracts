@@ -159,6 +159,26 @@ Constraints:
 
 There is no dynamic fee mutation in v1.
 
+## Safety Controls
+
+`RevealReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
+
+The owner can independently pause:
+
+- listing creation
+- purchases
+- quote signer updates
+
+v1 also enforces conservative hard caps:
+
+- title: 96 bytes
+- resourceId: 128 bytes
+- min purchase: 1 USDC (`1e6`)
+- max purchase: 5,000 USDC (`5_000e6`)
+- max quote TTL: 24 hours
+- max listings per seller: 50
+- max quote signers per seller: 3
+
 ## Contract Surface
 
 Core contract:
@@ -212,6 +232,10 @@ Required envs:
 - `SETTLEMENT_TOKEN`
 - `FEE_RECIPIENT`
 - `PROTOCOL_FEE_BPS`
+
+Optional envs:
+
+- `PROTOCOL_OWNER` to override the default owner; otherwise the deployer is used
 
 `FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
 

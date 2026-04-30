@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Test} from "forge-std/Test.sol";
@@ -20,8 +21,8 @@ contract ReceiptMockUSDC is ERC20 {
 }
 
 contract RevealReceiptStoreHarness is RevealReceiptStore {
-    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_)
-        RevealReceiptStore(settlementToken_, feeRecipient_, protocolFeeBps_)
+    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_, address owner_)
+        RevealReceiptStore(settlementToken_, feeRecipient_, protocolFeeBps_, owner_)
     {}
 
     function purchaseSignedReceiptForPayerAndExpectedBuyer(
@@ -75,15 +76,15 @@ contract RevealReceiptStoreTest is Test {
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
-        store = new RevealReceiptStore(address(usdc), feeRecipient, 0);
         seller = vm.addr(SELLER_PK);
         seller2 = vm.addr(SELLER2_PK);
         quoteSigner = vm.addr(QUOTE_SIGNER_PK);
         attacker = vm.addr(ATTACKER_PK);
+        store = new RevealReceiptStore(address(usdc), feeRecipient, 0, address(this));
 
-        usdc.mint(buyer, 1_000_000_000);
-        usdc.mint(buyer2, 1_000_000_000);
-        usdc.mint(attacker, 1_000_000_000);
+        usdc.mint(buyer, 10_000_000_000);
+        usdc.mint(buyer2, 10_000_000_000);
+        usdc.mint(attacker, 10_000_000_000);
 
         vm.deal(seller, 10 ether);
         vm.deal(seller2, 10 ether);
@@ -93,19 +94,49 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function _deployStore(uint16 feeBps) internal returns (RevealReceiptStore deployedStore) {
-        deployedStore = new RevealReceiptStore(address(usdc), feeRecipient, feeBps);
+        deployedStore = _deployStore(feeBps, address(this));
+    }
+
+    function _deployStore(uint16 feeBps, address owner_) internal returns (RevealReceiptStore deployedStore) {
+        deployedStore = new RevealReceiptStore(address(usdc), feeRecipient, feeBps, owner_);
     }
 
     function _deployHarnessStore(uint16 feeBps) internal returns (RevealReceiptStoreHarness deployedStore) {
-        deployedStore = new RevealReceiptStoreHarness(address(usdc), feeRecipient, feeBps);
+        deployedStore = _deployHarnessStore(feeBps, address(this));
+    }
+
+    function _deployHarnessStore(uint16 feeBps, address owner_)
+        internal
+        returns (RevealReceiptStoreHarness deployedStore)
+    {
+        deployedStore = new RevealReceiptStoreHarness(address(usdc), feeRecipient, feeBps, owner_);
     }
 
     function _createListingAs(address sellerAccount, string memory listingTitle, string memory listingResourceId)
         internal
         returns (uint256 listingId)
     {
+        listingId = _createListingAs(store, sellerAccount, listingTitle, listingResourceId, unitPrice);
+    }
+
+    function _createListingAs(
+        address sellerAccount,
+        string memory listingTitle,
+        string memory listingResourceId,
+        uint256 price
+    ) internal returns (uint256 listingId) {
+        listingId = _createListingAs(store, sellerAccount, listingTitle, listingResourceId, price);
+    }
+
+    function _createListingAs(
+        RevealReceiptStore targetStore,
+        address sellerAccount,
+        string memory listingTitle,
+        string memory listingResourceId,
+        uint256 price
+    ) internal returns (uint256 listingId) {
         vm.prank(sellerAccount);
-        listingId = store.createListing(listingTitle, listingResourceId, unitPrice);
+        listingId = targetStore.createListing(listingTitle, listingResourceId, price);
     }
 
     function _createListingAs(
@@ -114,12 +145,15 @@ contract RevealReceiptStoreTest is Test {
         string memory listingTitle,
         string memory listingResourceId
     ) internal returns (uint256 listingId) {
-        vm.prank(sellerAccount);
-        listingId = targetStore.createListing(listingTitle, listingResourceId, unitPrice);
+        listingId = _createListingAs(targetStore, sellerAccount, listingTitle, listingResourceId, unitPrice);
     }
 
     function _createListingAsSeller() internal returns (uint256 listingId) {
         listingId = _createListingAs(seller, title, resourceId);
+    }
+
+    function _createListingAsSeller(uint256 price) internal returns (uint256 listingId) {
+        listingId = _createListingAs(seller, title, resourceId, price);
     }
 
     function _setQuoteSigner(RevealReceiptStore targetStore, address sellerAccount, address signer, bool authorized)
@@ -231,6 +265,22 @@ contract RevealReceiptStoreTest is Test {
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
+    function _makeString(uint256 length) internal pure returns (string memory value) {
+        bytes memory buffer = new bytes(length);
+        for (uint256 i; i < length; ++i) {
+            buffer[i] = bytes1(uint8(97 + (i % 26)));
+        }
+        value = string(buffer);
+    }
+
+    function _makePurchaseRef(uint256 nonce) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked("purchase-", nonce));
+    }
+
+    function _expectOnlyOwnerRevert(address caller) internal {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
+    }
+
     function test_ListingCreated_Emits() public {
         vm.expectEmit(true, true, false, true);
         emit RevealReceiptStore.ListingCreated(1, seller, title, resourceId, unitPrice);
@@ -267,37 +317,145 @@ contract RevealReceiptStoreTest is Test {
         assertEq(listingIds[0], listingId);
     }
 
-    function test_CreateListing_InvalidParamsRevert() public {
+    function test_CreateListing_EmptyTitleReverts() public {
         vm.prank(seller);
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
         store.createListing("", resourceId, unitPrice);
+    }
 
+    function test_CreateListing_EmptyResourceIdReverts() public {
         vm.prank(seller);
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
         store.createListing(title, "", unitPrice);
+    }
+
+    function test_CreateListing_UnitPriceBelowMinReverts() public {
+        uint256 belowMin = store.MIN_PURCHASE_AMOUNT() - 1;
 
         vm.prank(seller);
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        store.createListing(title, resourceId, 0);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
+        store.createListing(title, resourceId, belowMin);
+    }
+
+    function test_CreateListing_UnitPriceAtMinSucceeds() public {
+        uint256 listingId = _createListingAsSeller(store.MIN_PURCHASE_AMOUNT());
+        assertEq(store.getListing(listingId).unitPrice, store.MIN_PURCHASE_AMOUNT());
+    }
+
+    function test_CreateListing_UnitPriceAtMaxSucceeds() public {
+        uint256 listingId = _createListingAsSeller(store.MAX_PURCHASE_AMOUNT());
+        assertEq(store.getListing(listingId).unitPrice, store.MAX_PURCHASE_AMOUNT());
+    }
+
+    function test_CreateListing_UnitPriceAboveMaxReverts() public {
+        uint256 aboveMax = store.MAX_PURCHASE_AMOUNT() + 1;
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
+        store.createListing(title, resourceId, aboveMax);
+    }
+
+    function test_CreateListing_TitleAtMaxLengthSucceeds() public {
+        string memory exactTitle = _makeString(store.MAX_TITLE_LENGTH());
+
+        uint256 listingId = _createListingAs(seller, exactTitle, resourceId);
+        assertEq(store.getListing(listingId).title, exactTitle);
+    }
+
+    function test_CreateListing_TitleAboveMaxLengthReverts() public {
+        string memory oversizedTitle = _makeString(store.MAX_TITLE_LENGTH() + 1);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.TextTooLong.selector);
+        store.createListing(oversizedTitle, resourceId, unitPrice);
+    }
+
+    function test_CreateListing_ResourceIdAtMaxLengthSucceeds() public {
+        string memory exactResourceId = _makeString(store.MAX_RESOURCE_ID_LENGTH());
+
+        uint256 listingId = _createListingAs(seller, title, exactResourceId);
+        assertEq(store.getListing(listingId).resourceId, exactResourceId);
+    }
+
+    function test_CreateListing_ResourceIdAboveMaxLengthReverts() public {
+        string memory oversizedResourceId = _makeString(store.MAX_RESOURCE_ID_LENGTH() + 1);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.TextTooLong.selector);
+        store.createListing(title, oversizedResourceId, unitPrice);
+    }
+
+    function test_Constructor_SucceedsWithValidOwner() public {
+        address configuredOwner = address(0xA11CE123);
+
+        RevealReceiptStore ownedStore = new RevealReceiptStore(address(usdc), feeRecipient, 0, configuredOwner);
+
+        assertEq(ownedStore.owner(), configuredOwner);
     }
 
     function test_Constructor_InvalidParamsRevert() public {
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(0), feeRecipient, 0);
+        new RevealReceiptStore(address(0), feeRecipient, 0, address(this));
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(usdc), address(0), 1);
+        new RevealReceiptStore(address(usdc), address(0), 1, address(this));
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(usdc), feeRecipient, 1_001);
+        new RevealReceiptStore(address(usdc), feeRecipient, 1_001, address(this));
+    }
+
+    function test_Constructor_ZeroOwnerReverts() public {
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        new RevealReceiptStore(address(usdc), feeRecipient, 0, address(0));
     }
 
     function test_Constructor_AllowsZeroFeeRecipientWhenFeeDisabled() public {
-        RevealReceiptStore zeroFeeStore = new RevealReceiptStore(address(usdc), address(0), 0);
+        RevealReceiptStore zeroFeeStore = new RevealReceiptStore(address(usdc), address(0), 0, address(this));
 
         assertEq(address(zeroFeeStore.settlementToken()), address(usdc));
         assertEq(zeroFeeStore.feeRecipient(), address(0));
         assertEq(zeroFeeStore.protocolFeeBps(), 0);
+    }
+
+    function test_Owner_ReturnsConfiguredOwner() public view {
+        assertEq(store.owner(), address(this));
+    }
+
+    function test_PauseSetters_NonOwnerReverts() public {
+        vm.startPrank(attacker);
+        _expectOnlyOwnerRevert(attacker);
+        store.setListingCreationPaused(true);
+
+        _expectOnlyOwnerRevert(attacker);
+        store.setPurchasesPaused(true);
+
+        _expectOnlyOwnerRevert(attacker);
+        store.setQuoteSignerUpdatesPaused(true);
+        vm.stopPrank();
+    }
+
+    function test_PauseSetters_OwnerCanUpdateAll() public {
+        store.setListingCreationPaused(true);
+        store.setPurchasesPaused(true);
+        store.setQuoteSignerUpdatesPaused(true);
+
+        assertTrue(store.listingCreationPaused());
+        assertTrue(store.purchasesPaused());
+        assertTrue(store.quoteSignerUpdatesPaused());
+    }
+
+    function test_PauseSetters_EmitEvents() public {
+        vm.expectEmit(false, false, false, true);
+        emit RevealReceiptStore.ListingCreationPauseChanged(true);
+        store.setListingCreationPaused(true);
+
+        vm.expectEmit(false, false, false, true);
+        emit RevealReceiptStore.PurchasesPauseChanged(true);
+        store.setPurchasesPaused(true);
+
+        vm.expectEmit(false, false, false, true);
+        emit RevealReceiptStore.QuoteSignerUpdatesPauseChanged(true);
+        store.setQuoteSignerUpdatesPaused(true);
     }
 
     function test_EIP712Constants_AreExpected() public view {
@@ -309,6 +467,55 @@ contract RevealReceiptStoreTest is Test {
                 "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
             )
         );
+    }
+
+    function test_ListingCreationPause_BlocksNewListings() public {
+        store.setListingCreationPaused(true);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.ListingCreationPaused.selector);
+        store.createListing(title, resourceId, unitPrice);
+    }
+
+    function test_ListingCreationPause_DoesNotBlockExistingPurchases() public {
+        uint256 listingId = _createListingAsSeller();
+
+        store.setListingCreationPaused(true);
+
+        uint256 receiptId = _purchaseReceiptAs(listingId, buyer, purchaseRef);
+        assertEq(receiptId, 1);
+    }
+
+    function test_ListingCreationPause_UnpauseRestoresCreateListing() public {
+        store.setListingCreationPaused(true);
+        store.setListingCreationPaused(false);
+
+        uint256 listingId = _createListingAsSeller();
+        assertEq(listingId, 1);
+    }
+
+    function test_CreateListing_EnforcesListingCapPerSeller() public {
+        uint256 maxListings = store.MAX_LISTINGS_PER_SELLER();
+
+        for (uint256 i; i < maxListings; ++i) {
+            uint256 listingId = _createListingAs(
+                seller,
+                string(abi.encodePacked("title-", vm.toString(i))),
+                string(abi.encodePacked("resource-", vm.toString(i)))
+            );
+            assertEq(listingId, i + 1);
+        }
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.SellerListingLimitReached.selector);
+        store.createListing("overflow-title", "overflow-resource", unitPrice);
+
+        uint256 seller2ListingId = _createListingAs(seller2, "seller-two-title", "seller-two-resource");
+        uint256[] memory sellerListingIds = store.getListingsBySeller(seller);
+        uint256[] memory seller2ListingIds = store.getListingsBySeller(seller2);
+        assertEq(seller2ListingId, maxListings + 1);
+        assertEq(sellerListingIds.length, maxListings);
+        assertEq(seller2ListingIds.length, 1);
     }
 
     function test_SetListingActive_TogglesAndBlocksPurchases() public {
@@ -366,8 +573,37 @@ contract RevealReceiptStoreTest is Test {
         uint256 listingId = _createListingAsSeller();
 
         vm.prank(seller);
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
         store.setListingPrice(listingId, 0);
+    }
+
+    function test_SetListingPrice_AtMinSucceeds() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 minPurchaseAmount = store.MIN_PURCHASE_AMOUNT();
+
+        vm.prank(seller);
+        store.setListingPrice(listingId, minPurchaseAmount);
+
+        assertEq(store.getListing(listingId).unitPrice, minPurchaseAmount);
+    }
+
+    function test_SetListingPrice_AtMaxSucceeds() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 maxPurchaseAmount = store.MAX_PURCHASE_AMOUNT();
+
+        vm.prank(seller);
+        store.setListingPrice(listingId, maxPurchaseAmount);
+
+        assertEq(store.getListing(listingId).unitPrice, maxPurchaseAmount);
+    }
+
+    function test_SetListingPrice_AboveMaxReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 aboveMax = store.MAX_PURCHASE_AMOUNT() + 1;
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
+        store.setListingPrice(listingId, aboveMax);
     }
 
     function test_SetQuoteSigner_AuthorizesSigner() public {
@@ -378,6 +614,7 @@ contract RevealReceiptStoreTest is Test {
         store.setQuoteSigner(quoteSigner, true);
 
         assertEq(store.authorizedQuoteSigners(seller, quoteSigner), true);
+        assertEq(store.authorizedQuoteSignerCount(seller), 1);
     }
 
     function test_SetQuoteSigner_IsScopedToCaller() public {
@@ -398,12 +635,153 @@ contract RevealReceiptStoreTest is Test {
         store.setQuoteSigner(quoteSigner, false);
 
         assertEq(store.authorizedQuoteSigners(seller, quoteSigner), false);
+        assertEq(store.authorizedQuoteSignerCount(seller), 0);
     }
 
     function test_SetQuoteSigner_ZeroSignerRejected() public {
         vm.prank(seller);
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
         store.setQuoteSigner(address(0), true);
+    }
+
+    function test_SetQuoteSigner_SelfAuthorizationRejected() public {
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.setQuoteSigner(seller, true);
+    }
+
+    function test_SetQuoteSigner_PauseBlocksUpdatesUntilUnpaused() public {
+        store.setQuoteSignerUpdatesPaused(true);
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.QuoteSignerUpdatesPaused.selector);
+        store.setQuoteSigner(quoteSigner, true);
+
+        store.setQuoteSignerUpdatesPaused(false);
+
+        vm.prank(seller);
+        store.setQuoteSigner(quoteSigner, true);
+
+        assertTrue(store.authorizedQuoteSigners(seller, quoteSigner));
+        assertEq(store.authorizedQuoteSignerCount(seller), 1);
+    }
+
+    function test_SetQuoteSigner_TracksCountAndEnforcesCap() public {
+        address signer1 = vm.addr(1001);
+        address signer2 = vm.addr(1002);
+        address signer3 = vm.addr(1003);
+        address signer4 = vm.addr(1004);
+
+        _setQuoteSigner(store, seller, signer1, true);
+        _setQuoteSigner(store, seller, signer2, true);
+        _setQuoteSigner(store, seller, signer3, true);
+
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER());
+
+        vm.prank(seller);
+        vm.expectRevert(RevealReceiptStore.QuoteSignerLimitReached.selector);
+        store.setQuoteSigner(signer4, true);
+
+        vm.prank(seller);
+        store.setQuoteSigner(signer1, true);
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER());
+
+        vm.prank(seller);
+        store.setQuoteSigner(signer1, false);
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER() - 1);
+
+        vm.prank(seller);
+        store.setQuoteSigner(signer1, false);
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER() - 1);
+
+        vm.prank(seller);
+        store.setQuoteSigner(signer4, true);
+        assertEq(store.authorizedQuoteSigners(seller, signer4), true);
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER());
+
+        _setQuoteSigner(store, seller2, signer1, true);
+        assertEq(store.authorizedQuoteSignerCount(seller2), 1);
+        assertEq(store.authorizedQuoteSignerCount(seller), store.MAX_QUOTE_SIGNERS_PER_SELLER());
+    }
+
+    function test_SetQuoteSigner_DirectSellerSignatureStillWorksAtSignerCap() public {
+        uint256 listingId = _createListingAsSeller();
+
+        _setQuoteSigner(store, seller, vm.addr(1001), true);
+        _setQuoteSigner(store, seller, vm.addr(1002), true);
+        _setQuoteSigner(store, seller, vm.addr(1003), true);
+
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + store.MAX_QUOTE_TTL())
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        assertEq(receiptId, 1);
+    }
+
+    function test_PurchasesPause_BlocksPurchaseReceipt() public {
+        uint256 listingId = _createListingAsSeller();
+
+        store.setPurchasesPaused(true);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchasesPaused.selector);
+        store.purchaseReceipt(listingId, purchaseRef);
+        vm.stopPrank();
+    }
+
+    function test_PurchasesPause_BlocksPurchaseSignedReceipt() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        store.setPurchasesPaused(true);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.PurchasesPaused.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchasesPause_AllowsSellerConfigAndGetters() public {
+        uint256 listingId = _createListingAsSeller();
+
+        store.setPurchasesPaused(true);
+
+        vm.prank(seller);
+        store.setListingPrice(listingId, updatedUnitPrice);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, false);
+
+        RevealReceiptStore.Listing memory listing = store.getListing(listingId);
+        uint256[] memory sellerListingIds = store.getListingsBySeller(seller);
+
+        assertEq(listing.unitPrice, updatedUnitPrice);
+        assertFalse(listing.active);
+        assertEq(sellerListingIds.length, 1);
+        assertEq(sellerListingIds[0], listingId);
+    }
+
+    function test_PurchasesPause_UnpauseRestoresPurchases() public {
+        uint256 listingId = _createListingAsSeller();
+
+        store.setPurchasesPaused(true);
+        store.setPurchasesPaused(false);
+
+        uint256 fixedReceiptId = _purchaseReceiptAs(listingId, buyer, purchaseRef);
+        assertEq(fixedReceiptId, 1);
+
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer2, purchaseRef2, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 signedReceiptId = _purchaseSignedReceiptAs(store, buyer2, quote, signature);
+        assertEq(signedReceiptId, 2);
     }
 
     function test_PurchaseReceipt_SettlesImmediatelyAndStoresReceipt() public {
@@ -598,6 +976,8 @@ contract RevealReceiptStoreTest is Test {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
         address integrator = address(0x1A7E);
+        assertFalse(feeStore.authorizedQuoteSigners(seller, seller));
+        assertEq(feeStore.authorizedQuoteSignerCount(seller), 0);
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
         bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
@@ -630,6 +1010,8 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
         assertEq(usdc.balanceOf(integrator), integratorBalanceBefore);
         assertEq(usdc.balanceOf(address(feeStore)), 0);
+        assertFalse(feeStore.authorizedQuoteSigners(seller, seller));
+        assertEq(feeStore.authorizedQuoteSignerCount(seller), 0);
     }
 
     function test_PurchaseSignedReceipt_PaysIntegratorFeeAndSellerNet() public {
@@ -825,7 +1207,7 @@ contract RevealReceiptStoreTest is Test {
         uint256 listingId = _createListingAs(feeStore, seller, title, resourceId);
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, 0);
-        quote.expiresAt = uint64(block.timestamp + 1);
+        quote.expiresAt = uint64(block.timestamp + 1 hours);
         bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
@@ -851,15 +1233,77 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
     }
 
-    function test_PurchaseSignedReceipt_ZeroQuoteAmountReverts() public {
+    function test_PurchaseSignedReceipt_QuoteExpiryBeyondMaxTtlReverts() public {
         uint256 listingId = _createListingAsSeller();
-        RevealReceiptStore.SignedReceiptQuote memory quote =
-            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, 0, uint64(block.timestamp + 1 days));
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + store.MAX_QUOTE_TTL() + 1)
+        );
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.startPrank(buyer);
-        usdc.approve(address(store), 0);
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.QuoteExpiryTooLong.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_QuoteExpiryAtMaxTtlSucceeds() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + store.MAX_QUOTE_TTL())
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        assertEq(receiptId, 1);
+    }
+
+    function test_PurchaseSignedReceipt_QuoteAmountBelowMinReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, store.MIN_PURCHASE_AMOUNT() - 1, uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quote.amount);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
+        store.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_QuoteAmountAtMinSucceeds() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, store.MIN_PURCHASE_AMOUNT(), uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        assertEq(store.getReceipt(receiptId).amount, store.MIN_PURCHASE_AMOUNT());
+    }
+
+    function test_PurchaseSignedReceipt_QuoteAmountAtMaxSucceeds() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, store.MAX_PURCHASE_AMOUNT(), uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        assertEq(store.getReceipt(receiptId).amount, store.MAX_PURCHASE_AMOUNT());
+    }
+
+    function test_PurchaseSignedReceipt_QuoteAmountAboveMaxReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
+            listingId, buyer, purchaseRef, store.MAX_PURCHASE_AMOUNT() + 1, uint64(block.timestamp + 1 days)
+        );
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quote.amount);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
         store.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
     }
@@ -1088,7 +1532,7 @@ contract RevealReceiptStoreTest is Test {
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, 0, uint64(block.timestamp + 1 days));
 
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
         store.previewSignedReceiptPurchase(quote);
     }
 

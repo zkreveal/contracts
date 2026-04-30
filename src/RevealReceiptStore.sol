@@ -6,6 +6,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 import {FeeMath} from "./FeeMath.sol";
 
@@ -13,7 +15,7 @@ import {FeeMath} from "./FeeMath.sol";
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
 /// @dev Sellers create listings, buyers pay with seller-issued purchase references,
 /// and settlement completes immediately with an on-chain receipt record.
-contract RevealReceiptStore is EIP712, ReentrancyGuard {
+contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // -------------------------------------------------------------------------
@@ -24,6 +26,14 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     string public constant EIP712_VERSION = "1";
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 1_000;
+    uint256 public constant MAX_TITLE_LENGTH = 96;
+    uint256 public constant MAX_RESOURCE_ID_LENGTH = 128;
+    /// @dev v1 purchase amount caps assume a 6-decimal settlement token such as USDC.
+    uint256 public constant MIN_PURCHASE_AMOUNT = 1e6;
+    uint256 public constant MAX_PURCHASE_AMOUNT = 5_000e6;
+    uint64 public constant MAX_QUOTE_TTL = 24 hours;
+    uint256 public constant MAX_LISTINGS_PER_SELLER = 50;
+    uint256 public constant MAX_QUOTE_SIGNERS_PER_SELLER = 3;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
         "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
     );
@@ -91,10 +101,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     mapping(address => uint256[]) public receiptsByBuyer;
     mapping(address => uint256[]) public receiptsBySeller;
     mapping(address seller => mapping(address signer => bool)) public authorizedQuoteSigners;
+    mapping(address seller => uint256 count) public authorizedQuoteSignerCount;
     /// @dev Seller-issued `purchaseRef` values are generated off-chain and enforced as unique per seller.
     mapping(address => mapping(bytes32 => bool)) public purchaseRefUsed;
     /// @dev Deterministic seller-scoped reconciliation helper for off-chain generated refs. Returns 0 if unused.
     mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
+
+    bool public listingCreationPaused;
+    bool public purchasesPaused;
+    bool public quoteSignerUpdatesPaused;
 
     // -------------------------------------------------------------------------
     // Events
@@ -129,6 +144,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     );
 
     event QuoteSignerAuthorizationChanged(address indexed seller, address indexed signer, bool authorized);
+    event ListingCreationPauseChanged(bool paused);
+    event PurchasesPauseChanged(bool paused);
+    event QuoteSignerUpdatesPauseChanged(bool paused);
 
     // -------------------------------------------------------------------------
     // Errors
@@ -144,6 +162,14 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     error InvalidQuoteSigner();
     error QuoteBuyerMismatch();
     error IntegratorFeeTooHigh();
+    error ListingCreationPaused();
+    error PurchasesPaused();
+    error QuoteSignerUpdatesPaused();
+    error TextTooLong();
+    error AmountOutOfBounds();
+    error QuoteExpiryTooLong();
+    error SellerListingLimitReached();
+    error QuoteSignerLimitReached();
 
     // -------------------------------------------------------------------------
     // Modifiers
@@ -163,8 +189,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     // Constructor
     // -------------------------------------------------------------------------
 
-    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_)
+    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_, address owner_)
         EIP712(EIP712_NAME, EIP712_VERSION)
+        Ownable(_validateOwner(owner_))
     {
         if (settlementToken_ == address(0)) revert InvalidParams();
         if (protocolFeeBps_ > MAX_PROTOCOL_FEE_BPS) revert InvalidParams();
@@ -178,6 +205,26 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     // -------------------------------------------------------------------------
     // Internal Helpers
     // -------------------------------------------------------------------------
+
+    function _validateOwner(address owner_) internal pure returns (address validatedOwner) {
+        if (owner_ == address(0)) revert InvalidParams();
+        return owner_;
+    }
+
+    function _validatePurchaseAmount(uint256 amount) internal pure {
+        if (amount < MIN_PURCHASE_AMOUNT || amount > MAX_PURCHASE_AMOUNT) {
+            revert AmountOutOfBounds();
+        }
+    }
+
+    function _validateListingText(string calldata title, string calldata resourceId) internal pure {
+        uint256 titleLength = bytes(title).length;
+        uint256 resourceIdLength = bytes(resourceId).length;
+        if (titleLength == 0 || resourceIdLength == 0) revert InvalidParams();
+        if (titleLength > MAX_TITLE_LENGTH || resourceIdLength > MAX_RESOURCE_ID_LENGTH) {
+            revert TextTooLong();
+        }
+    }
 
     function _quoteProtocolFee(uint256 grossAmount) internal view returns (uint256) {
         return grossAmount * protocolFeeBps / FeeMath.BPS_DENOMINATOR;
@@ -275,9 +322,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         if (!listing.active) revert ListingInactive();
         if (quote.buyer != expectedBuyer) revert QuoteBuyerMismatch();
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
-        if (quote.amount == 0) revert InvalidParams();
+        _validatePurchaseAmount(quote.amount);
         _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
+        if (quote.expiresAt > block.timestamp + MAX_QUOTE_TTL) revert QuoteExpiryTooLong();
         if (purchaseRefUsed[listing.seller][quote.purchaseRef]) revert PurchaseRefAlreadyUsed();
 
         bytes32 digest = _hashSignedReceiptQuote(quote, listing.seller);
@@ -333,11 +381,46 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     /// @notice Authorize or revoke a signer that can create dynamic receipt quotes for the caller's listings.
     /// @dev Authorized quote signers can sign dynamic receipt quotes for any listing owned by `msg.sender`.
     function setQuoteSigner(address signer, bool authorized) external {
+        if (quoteSignerUpdatesPaused) revert QuoteSignerUpdatesPaused();
         if (signer == address(0)) revert InvalidParams();
+        if (signer == msg.sender) revert InvalidParams();
+        bool currentlyAuthorized = authorizedQuoteSigners[msg.sender][signer];
+        if (authorized == currentlyAuthorized) {
+            emit QuoteSignerAuthorizationChanged(msg.sender, signer, authorized);
+            return;
+        }
+
+        if (authorized) {
+            if (authorizedQuoteSignerCount[msg.sender] >= MAX_QUOTE_SIGNERS_PER_SELLER) {
+                revert QuoteSignerLimitReached();
+            }
+            authorizedQuoteSignerCount[msg.sender]++;
+        } else {
+            authorizedQuoteSignerCount[msg.sender]--;
+        }
 
         authorizedQuoteSigners[msg.sender][signer] = authorized;
 
         emit QuoteSignerAuthorizationChanged(msg.sender, signer, authorized);
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin Safety Functions
+    // -------------------------------------------------------------------------
+
+    function setListingCreationPaused(bool paused) external onlyOwner {
+        listingCreationPaused = paused;
+        emit ListingCreationPauseChanged(paused);
+    }
+
+    function setPurchasesPaused(bool paused) external onlyOwner {
+        purchasesPaused = paused;
+        emit PurchasesPauseChanged(paused);
+    }
+
+    function setQuoteSignerUpdatesPaused(bool paused) external onlyOwner {
+        quoteSignerUpdatesPaused = paused;
+        emit QuoteSignerUpdatesPauseChanged(paused);
     }
 
     // -------------------------------------------------------------------------
@@ -351,9 +434,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         external
         returns (uint256 listingId)
     {
-        if (bytes(title).length == 0) revert InvalidParams();
-        if (bytes(resourceId).length == 0) revert InvalidParams();
-        if (unitPrice == 0) revert InvalidParams();
+        if (listingCreationPaused) revert ListingCreationPaused();
+        _validateListingText(title, resourceId);
+        _validatePurchaseAmount(unitPrice);
+        if (listingsBySeller[msg.sender].length >= MAX_LISTINGS_PER_SELLER) {
+            revert SellerListingLimitReached();
+        }
 
         listingId = nextListingId++;
 
@@ -381,7 +467,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
     ///      Signed receipt quotes may use custom amounts independent of `listing.unitPrice`.
     function setListingPrice(uint256 listingId, uint256 newUnitPrice) external listingExists(listingId) {
         _onlyListingSeller(listingId);
-        if (newUnitPrice == 0) revert InvalidParams();
+        _validatePurchaseAmount(newUnitPrice);
 
         Listing storage listing = listings[listingId];
         uint256 oldUnitPrice = listing.unitPrice;
@@ -403,6 +489,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         listingExists(listingId)
         returns (uint256 receiptId)
     {
+        if (purchasesPaused) revert PurchasesPaused();
         Listing storage listing = listings[listingId];
 
         if (!listing.active) revert ListingInactive();
@@ -433,6 +520,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         listingExists(quote.listingId)
         returns (uint256 receiptId)
     {
+        if (purchasesPaused) revert PurchasesPaused();
         Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, msg.sender);
 
         return _settleReceiptPurchase(
@@ -497,7 +585,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard {
         )
     {
         Listing storage listing = listings[quote.listingId];
-        if (quote.amount == 0) revert InvalidParams();
+        _validatePurchaseAmount(quote.amount);
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
         _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
 
