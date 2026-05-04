@@ -1,310 +1,414 @@
-# Reveal Protocol
+# zkReveal v1
 
-Reveal Protocol is an on-chain encrypted digital delivery escrow primitive.
+zkReveal v1 is a minimal on-chain receipt and settlement layer for digital sellers.
 
-It enables sellers to deliver encrypted access (files, credentials, or content) to buyers using time-bound escrow, where delivery is enforced on-chain and decryption happens off-chain.
+Buyer pays.  
+Seller gets paid.  
+Your backend receives a verifiable on-chain purchase receipt.
 
-This repository contains the v0 smart contract implementation for Reveal Protocol, built with Foundry. The current Arbitrum Sepolia deployment predates the rename and still appears under the legacy contract name `ZkRevealStore`.
+Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchased`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
-Reveal Protocol is a minimal, composable on-chain primitive designed to be integrated into marketplaces, APIs, and off-chain delivery systems, focusing purely on enforcement and settlement while leaving validation and UX to integrators.
+v1 is Receipt Mode only.
 
-## Why Reveal Protocol
+- v1 is not Delivery Mode
+- v1 is not Escrow Mode
+- v1 does not support refunds or reclaim flows
+- v1 does not support buyer public keys, encrypted payloads, content CIDs, inventory units, or delivery deadlines
+- v1 does not do dynamic on-chain pricing, oracle pricing, or marketplace fee routing
+- v1 does not expose cross-chain gateway adapter entrypoints
 
-Most digital commerce today relies on trusted platforms to handle delivery of digital goods.
+## Product Model
 
-Reveal Protocol introduces a minimal on-chain primitive for:
-- encrypted delivery of digital assets
-- time-bound escrow with automatic refund
-- composable purchase receipts on-chain
+`RevealReceiptStore` is the only required v1 product contract.
 
-This enables new patterns for:
-- private data marketplaces
-- API key or credential delivery
-- gated content and access systems
+## Purchase Modes
 
-## Why Arbitrum
+For production checkout/payment-link flows, prefer signed quotes.
 
-Reveal Protocol benefits from Arbitrum’s:
+### `purchaseReceipt(listingId, purchaseRef)`
 
-- low transaction costs for frequent escrow creation
-- fast confirmations for buyer-seller interactions
-- strong EVM compatibility and tooling
-- suitability for building higher-level protocols on top
+- Public fixed-price listing purchase.
+- Uses the listing's current `unitPrice` at execution time.
+- Does not bind the buyer before submission.
+- Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt.
+- Suitable for simple public listings where any buyer may purchase.
+- Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
 
-Arbitrum provides a practical base layer for scaling encrypted delivery primitives into real-world applications.
+### `purchaseSignedReceipt(quote, sellerSignature)`
 
-> ⚠️ **Warning**
-> This is a v0 trusted-seller escrow model.  
-> The contract enforces delivery timing but does not verify correctness of delivered content.  
-> Do not use in production without further validation and auditing.
+- Recommended default for production checkout/payment-link flows.
+- Uses a seller-authorized EIP-712 quote.
+- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, expiry, chain, and contract.
+- Prevents another wallet from using the same seller-issued quote because `quote.buyer` must match `msg.sender`.
+- Supports dynamic pricing and optional integrator fees.
+- Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
 
-## System Flow
+### Fixed-price receipt flow
 
-Seller creates listing
-→ Adds inventory units
-→ Buyer opens escrow with public key
-→ Seller delivers encrypted payload + CID before deadline
+Buyer Proof Mode fits inside the fixed-price path.
 
-Outcome:
-- Delivered → seller paid
-- Timeout → buyer refunded
+1. Create a fixed-price listing with `createListing(listingHash, unitPrice)`.
+2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
+3. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
+4. Agree on a `rawPurchaseRef` off-chain and derive the canonical seller-scoped `purchaseRef` with `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, or compute the same hash off-chain.
+5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
 
-This flow ensures that payment is conditional on timely delivery, while keeping content encryption and verification fully off-chain.
+`purchaseReceipt` is the direct fixed-price purchase path. It uses the listing's current `unitPrice`, is public, and is not buyer-bound before submission. Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
 
-## Architecture (v0)
+`listingHash` is an opaque seller-defined metadata commitment. Human-readable product data lives off-chain, for example inside a seller-signed payment link or checkout payload.
 
-Reveal Protocol uses a hierarchical model:
+### Signed quote receipt flow
 
-- `Listing`: reusable sale entry with human-readable `title`, seller-defined `resourceId`, and per-unit price.
-- `InventoryUnit`: one inventory unit under a listing; `contentCID` is assigned only when the seller delivers an escrow.
-- `Escrow`: one buyer purchase tied to exactly one allocated inventory unit.
+Seller Payment Link Mode fits inside the signed quote path and is the recommended default for production checkout flows.
 
-Seller identity is defined by the seller’s wallet address.
+1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the seller-scoped `purchaseRef` hash.
+2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`; the EIP-712 digest also binds the listing `seller` and v1 `settlementToken`.
+4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
+5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
+6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
 
-## Security Model (v0)
+Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
+`metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
 
-This contract is a trusted-seller delivery escrow, not a trustless proof system.
+Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt.
 
-- `deliverEscrow` only verifies that `contentCID` and `encryptedKey` are non-empty and submitted on or before the escrow deadline.
-- The contract does not prove that the CID or encrypted payload are correct for the allocated item.
-- Seller is paid immediately after successful delivery submission.
-- Correctness of the delivered payload is verified off-chain by the buyer.
+Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify the seller signature, buyer match, expiry, listing active status, or replay state.
 
-## On-Chain Visibility
+Dynamic signed quotes may be signed either by the seller wallet directly or by an authorized quote signer. This lets a seller keep the settlement wallet separate from a backend hot key. The seller authorizes a signer once with `setQuoteSigner`, and that signer can create dynamic quotes for the seller's listings.
 
-The following data is public on-chain or retrievable from contract state:
+Authorized quote signers can sign dynamic receipt quotes for any listing owned by that seller. Revoke compromised signers immediately with `setQuoteSigner(signer, false)`.
 
-- listing `title` and `resourceId`
-- delivered `InventoryUnit.contentCID`
-- `Escrow.buyerPubKey`
-- `Escrow.encryptedKey`
-- escrow timestamps, status, seller, buyer, listing id, and inventory unit id
+### Integrator fees
 
-The following data is not stored on-chain:
+Integrator fees are supported only through seller-authorized signed quotes.
 
-- plaintext content
-- buyer private key
-- decrypted symmetric key material
+This lets marketplaces, bots, checkout frontends, dashboards, and other seller tools monetize without changing seller settlement semantics. The seller or authorized quote signer includes `integratorFeeRecipient` and `integratorFeeAmount` in the signed quote.
 
-## Core Contract
+On purchase, zkReveal pays:
 
-- `src/RevealStore.sol`
+1. protocol fee
+2. integrator fee, if present
+3. seller net amount
 
-Key storage:
+`receipt.amount` remains the gross amount paid. Fee breakdowns should be indexed from `ProtocolFeePaid` and `IntegratorFeePaid`.
 
-- `listings[listingId]`
-- `inventoryUnits[inventoryUnitId]`
-- `escrows[escrowId]`
-- `listingsBySeller[seller]`
-- `listingInventoryUnitIds[listingId]`
+## Signed Quote Typed Data
 
-Escrow status:
+TypeScript signing shape:
 
-- `Pending`
-- `Delivered`
-- `Reclaimed`
-
-## Listing Identity
-
-- `listingId` is the canonical protocol-local on-chain identifier.
-- `resourceId` is a seller-defined, machine-readable, non-normalized identifier for integrations.
-- `resourceId` is not unique and must not be treated as a globally safe identifier by itself.
-
-For off-chain canonical identity, prefer:
-
-- `(chainId, contractAddress, listingId)`
-
-For off-chain semantic identity, prefer:
-
-- `(chainId, contractAddress, seller, resourceId)`
-
-Each escrow can be treated as an on-chain purchase receipt. A delivered escrow is a delivered claim for the listing's semantic resource identity.
-
-## High-Level Flows
-
-### Seller flow
-
-1. Create listing via `createListing(title, resourceId, unitPrice, refundWindow)`.
-2. Add inventory units via `addInventoryUnitsToListing(listingId, count)`.
-3. Buyer creates escrow via `createEscrow`.
-4. Seller submits both `contentCID` and a non-empty encrypted delivery payload via `deliverEscrow(escrowId, contentCID, encryptedKey)`.
-5. Contract pays seller immediately on successful delivery submission.
-
-### Buyer flow
-
-1. Generate buyer encryption keypair off-chain.
-2. Call `createEscrow(listingId, buyerPubKey)` and pay exact `unitPrice`.
-3. Wait for seller delivery; read the public `escrow.encryptedKey` from `getEscrow`.
-4. Read the delivered `contentCID` from the allocated inventory unit via `getInventoryUnit(escrow.inventoryUnitId)`.
-5. Decrypt content key off-chain and use the delivered `contentCID`.
-6. If seller misses deadline, call `reclaimEscrow(escrowId)` to refund.
-
-## Function Interface and Data Use
-
-### `createListing(string title, string resourceId, uint256 unitPrice, uint64 refundWindow)`
-
-Inputs:
-
-- `title`: listing name
-- `resourceId`: seller-defined semantic identifier for integrations
-- `unitPrice`: price per item
-- `refundWindow`: escrow reclaim window
-
-Uses:
-
-- validates non-empty title, non-empty resourceId, non-zero price, and refund window bounds
-
-Writes:
-
-- new `Listing`
-- `listingsBySeller[msg.sender]`
-
-### `addInventoryUnitsToListing(uint256 listingId, uint256 count)`
-
-Inputs:
-
-- `listingId`
-- `count`: number of inventory units to add
-
-Uses:
-
-- caller must be listing seller
-- count must be greater than zero
-
-Writes:
-
-- appends empty `InventoryUnit` rows
-- appends to `listingInventoryUnitIds[listingId]`
-- increments listing `totalInventoryUnits`
-
-### `setListingActive(uint256 listingId, bool active)`
-
-Inputs:
-
-- `listingId`
-- `active`
-
-Uses:
-
-- caller must be listing seller
-
-Writes:
-
-- listing availability flag
-
-### `createEscrow(uint256 listingId, bytes buyerPubKey) payable`
-
-Inputs:
-
-- `listingId`
-- `buyerPubKey`
-- `msg.value`
-
-Uses:
-
-- listing must be active with available inventory
-- `msg.value` must equal listing `unitPrice`
-- internally calls `_allocateNextInventoryUnit(listingId)` (sequential allocation)
-
-Writes:
-
-- marks one `InventoryUnit` as `consumed`
-- creates `Escrow` with listing/inventory-unit linkage, buyer/seller, amount, key, timestamps, deadline, status
-
-### `deliverEscrow(uint256 escrowId, string contentCID, bytes encryptedKey)`
-
-Inputs:
-
-- `escrowId`
-- `contentCID`
-- `encryptedKey`
-
-Uses:
-
-- caller must be escrow seller
-- escrow must be `Pending`
-- `contentCID` must be non-empty
-- must be on or before deadline
-
-Writes:
-
-- stores `contentCID` on the allocated `InventoryUnit`
-- stores `encryptedKey`
-- sets escrow status to `Delivered`
-- transfers escrow amount to seller
-
-**Note:**
-
-- the contract does not verify whether `contentCID` or `encryptedKey` are correct for the buyer or the allocated item
-
-### `reclaimEscrow(uint256 escrowId)`
-
-Inputs:
-
-- `escrowId`
-
-Uses:
-
-- caller must be escrow buyer
-- escrow must be `Pending`
-- deadline must have passed
-
-Writes:
-
-- sets escrow status to `Reclaimed`
-- refunds escrow amount to buyer
-- inventory units are not restored after reclaim
-
-## Events
-
-- `ListingCreated` includes `resourceId`
-- `InventoryUnitAdded`
-- `ListingStatusChanged`
-- `EscrowCreated` keeps prior fields and appends `resourceId`
-- `EscrowDelivered` includes `listingId`, `buyer`, `resourceId`, and `contentCID`
-- `EscrowReclaimed` includes `listingId`, `buyer`, and `resourceId`
-
-## Deployments
-
-### Arbitrum Sepolia
-
-- Status: Deployed and live on Arbitrum Sepolia
-- Note: this deployment was published before the rename and uses the legacy source-level contract name `ZkRevealStore`
-- Chain ID: 421614
-- Contract: `0x80d0943a39B394e8a5B942c25D90bbB097c762bB`
-- Transaction: [View on Arbiscan](https://sepolia.arbiscan.io/tx/0xead9ef1dae770b4ae0c61d31508ebc88dfd9bb8596dc2f1df0a1ce47d1a8200f)
-- Block: 254067517
-
-### Mainnet
-- Planned target: Arbitrum One
-
-## Setup
-This project reads configuration from environment variables.
-
-```bash
-export DEPLOYER_PRIVATE_KEY="YOUR_PRIVATE_KEY"
-export RPC_ARB_SEPOLIA="YOUR_ARBITRUM_SEPOLIA_RPC_URL"
+```ts
+const domain = {
+  name: "RevealReceiptStore",
+  version: "1",
+  chainId,
+  verifyingContract: receiptStoreAddress,
+};
+
+const types = {
+  SignedReceiptQuote: [
+    { name: "listingId", type: "uint256" },
+    { name: "seller", type: "address" },
+    { name: "buyer", type: "address" },
+    { name: "purchaseRef", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+    { name: "metadataHash", type: "bytes32" },
+    { name: "settlementToken", type: "address" },
+    { name: "integratorFeeRecipient", type: "address" },
+    { name: "integratorFeeAmount", type: "uint256" },
+    { name: "expiresAt", type: "uint64" },
+  ],
+};
+
+const message = {
+  listingId,
+  seller, // always the listing seller address
+  buyer,
+  purchaseRef,
+  amount,
+  metadataHash, // hash of seller-defined readable checkout metadata
+  settlementToken,
+  integratorFeeRecipient, // zero address when no integrator fee is used
+  integratorFeeAmount, // zero when no integrator fee is used
+  expiresAt,
+};
+
+const signature = await signer.signTypedData(domain, types, message);
 ```
+
+The `seller` field in typed data is always the listing seller address, even when the signature is produced by an authorized quote signer. `metadataHash` should commit to the readable off-chain payment-link or checkout metadata you want the seller signature to protect. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
+
+The signed EIP-712 type is:
+
+```text
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
+```
+
+## Quote Signer Security
+
+`setQuoteSigner(signer, true)` authorizes `signer` at seller scope.
+
+- A seller-authorized quote signer can sign dynamic quotes for any listing owned by that seller.
+- Treat quote signers as hot operational keys.
+- Use a dedicated backend signer instead of the seller treasury key as a hot service key.
+- Rotate or revoke signers when team members, servers, or environments change.
+- Monitor signed quote generation in backend logs.
+- If a signer is compromised, revoke it immediately with `setQuoteSigner(signer, false)`.
+- Future versions may support per-listing signer scope, but v1 signer scope is seller-wide.
+
+## Hashes, Metadata, and Privacy
+
+`listingHash`, `purchaseRef`, and `metadataHash` are opaque commitments and identifiers. They are
+not encryption. If the underlying raw value is weak, predictable, or guessable, it may still be
+guessed off-chain.
+
+Keep human-readable product, order, and customer data off-chain in the seller backend, bot, or
+dashboard.
+
+- `listingHash` commits to seller-defined listing metadata without exposing human-readable product data.
+- `metadataHash` binds seller-defined payment-link or checkout metadata without revealing it on-chain.
+- `purchaseRef` is the seller-scoped on-chain hash of an off-chain raw operational order reference.
+
+### Purchase References
+
+In Receipt Mode, zkReveal separates the human-readable off-chain order reference from the
+on-chain receipt identifier.
+
+- `rawPurchaseRef` is generated by the seller, bot, frontend, or backend.
+- `rawPurchaseRef` stays off-chain.
+- `purchaseRef` is the seller-scoped `bytes32` hash submitted to the contract.
+- On-chain uniqueness and deterministic reconciliation are enforced per seller through
+  `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`, where `0` means unused.
+- The canonical hash is scoped by `zkRevealReceiptRef:v1`, `chainId`, the receipt store contract
+  address, the seller address, the listing ID, and the raw purchase reference.
+
+```solidity
+purchaseRef = keccak256(abi.encode(
+    "zkRevealReceiptRef:v1",
+    block.chainid,
+    address(receiptStore),
+    seller,
+    listingId,
+    rawPurchaseRef
+));
+```
+
+Because the contract already scopes the hash by chain, contract, seller, and listing, the raw
+reference should stay short and operational. It should identify the seller-side order in an
+external system, not describe the buyer or purchased content.
+
+Because `listingId` is included in the canonical hash, the same raw reference used on different
+listings produces different `purchaseRef` hashes.
+
+Because on-chain uniqueness is enforced per seller on the final `purchaseRef` hash, sellers should
+still treat each `rawPurchaseRef` as a unique operational order ID and avoid reusing it across
+orders, even on different listings.
+
+Frontend and backend integrations should usually let the contract helper derive the canonical
+hash:
+
+```ts
+const rawPurchaseRef = `ord_tg_${yyyymmdd}_${uniqueId}`;
+const purchaseRef = await receiptStore.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+```
+
+`rawPurchaseRef` must be non-empty, must stay off-chain, and must be at most 128 bytes.
+`purchaseRef` must remain unique per seller.
+
+Do not use emails, phone numbers, Telegram IDs, usernames, wallet labels, or predictable order
+numbers directly as `rawPurchaseRef`.
+
+Prefer random or opaque references such as:
+
+- `ord_tg_20260502_f8K2pQ9z`
+- `550e8400-e29b-41d4-a716-446655440000`
+
+Do not put sensitive buyer data, emails, Telegram usernames, private channel names, or plaintext
+secrets inside `rawPurchaseRef`.
+
+Hashes are commitments and identifiers, not encryption. Weak or guessable raw references may still
+be vulnerable to guessing.
+
+## Fulfillment Responsibility
+
+Receipt Mode is a proof-of-payment and settlement primitive. It is not an escrow or
+delivery-verification system.
+
+- Settlement is immediate.
+- The contract does not verify delivery, content correctness, access provisioning, product
+  quality, refunds, disputes, or whether the seller actually fulfilled the order.
+- Seller systems, bots, dashboards, or other off-chain workflows are responsible for fulfillment
+  after they detect a valid receipt.
+- Buyers and integrators should use trusted sellers or add their own refund or dispute layer
+  off-chain.
+- This is intentionally different from the older escrow or delivery mode designs.
+
+## Source of Truth
+
+`ListingCreated` and `ReceiptPurchased` are the source-of-truth events for listing and receipt
+discovery by seller bots, backends, dashboards, and indexers.
+Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
+`SellerPaid` records the seller net amount after protocol and integrator fees. `ProtocolFeePaid`
+and `IntegratorFeePaid` expose the rest of the payout breakdown.
+
+Backends can reconcile purchases by:
+
+- `seller`
+- `purchaseRef`
+
+If seller systems also need product context, they should resolve it off-chain from
+`rawPurchaseRef`, `purchaseRef`, `listingId`, or `listingHash`.
+
+The contract also stores:
+
+- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
+- `receipts[receiptId]`
+- `listingCountBySeller[seller]` only to enforce `MAX_LISTINGS_PER_SELLER`
+
+## Fee Model
+
+The v1 fee model is immutable at deployment:
+
+- `settlementToken`
+- `feeRecipient`
+- `protocolFeeBps`
+
+Constraints:
+
+- `protocolFeeBps` is capped at `MAX_PROTOCOL_FEE_BPS = 1_000` basis points
+- `integratorFeeAmount` in signed quotes is capped at `MAX_INTEGRATOR_FEE_BPS = 1_000` basis points of the quoted `amount`
+- `feeRecipient` must be non-zero when `protocolFeeBps > 0`
+- `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
+- `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
+- official v1 deployments are intended for a 6-decimal settlement token such as USDC
+- `MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals
+- deploying with an 18-decimal token changes the practical meaning of those caps and is not recommended unless constants are adjusted in a future version
+- for Arbitrum mainnet, use the canonical or native USDC deployment intended by the project
+- `settlementToken` should be a standard ERC-20 such as USDC
+- fee-on-transfer and rebasing tokens are not supported
+
+There is no dynamic fee mutation in v1.
+
+## Safety Controls
+
+`RevealReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
+
+The owner can independently pause:
+
+- listing creation
+- purchases
+- quote signer updates
+
+v1 also enforces conservative hard caps:
+
+- min purchase: 1 USDC (`1e6`) assuming a 6-decimal settlement token
+- max purchase: 5,000 USDC (`5_000e6`) assuming a 6-decimal settlement token
+- max quote TTL: 24 hours
+- max listings per seller: 50
+- max quote signers per seller: 3
+
+Integration guide:
+
+- [`docs/receipt-mode-integration.md`](docs/receipt-mode-integration.md)
+
+## Contract Surface
+
+Core contract:
+
+- `src/RevealReceiptStore.sol`
+
+Key functions:
+
+- `createListing`
+- `setQuoteSigner`
+- `setListingActive`
+- `setListingPrice`
+- `hashPurchaseRef`
+- `purchaseReceipt`
+- `purchaseSignedReceipt`
+- `quotePurchaseReceipt`
+- `previewSignedReceiptPurchase`
+- `validateSignedReceiptPurchase`
+- `hashSignedReceiptQuote`
+- `getReceiptIdBySellerAndPurchaseRef`
+
+Key events:
+
+- `ListingCreated`
+- `ListingStatusChanged`
+- `ListingPriceChanged`
+- `QuoteSignerAuthorizationChanged`
+- `ReceiptPurchased`
+- `SellerPaid`
+- `ProtocolFeePaid`
+- `IntegratorFeePaid`
 
 ## Development
 
 ```bash
-forge build
-forge fmt --check
+forge fmt
 forge test
-
-forge script script/Deploy.s.sol:Deploy \
-  --rpc-url "$RPC_ARB_SEPOLIA" \
-  --private-key "$DEPLOYER_PRIVATE_KEY" \
-  --broadcast
 ```
 
-## Additional Docs
+If Foundry crashes during trace signature lookup in your local environment, retry with:
 
-- `docs/ENCRYPTION_SPEC_V0.md` — encryption and delivery model
-- `docs/LOCK_SPEC.md` — escrow lifecycle and state transitions
+```bash
+forge test --offline --suppress-successful-traces
+```
 
-## License
+## Deployment
 
-This project is licensed under the Apache-2.0 License.
-See `LICENSE` for details.
+The v1 deploy script deploys only `RevealReceiptStore`.
+
+Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
+`MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals.
+Deploying with an 18-decimal token changes the practical meaning of those caps and is not
+recommended unless a future version adjusts the constants.
+
+For Arbitrum mainnet, use the canonical/native USDC deployment intended by the project.
+
+Required envs:
+
+- `RPC_URL`
+- `PRIVATE_KEY`
+- `SETTLEMENT_TOKEN`
+- `FEE_RECIPIENT`
+- `PROTOCOL_FEE_BPS`
+
+Optional envs:
+
+- `PROTOCOL_OWNER` to override the default owner; otherwise the deployer is used
+
+`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
+If `PROTOCOL_FEE_BPS=0`, `FEE_RECIPIENT` may also be omitted and the deploy script will default it to the zero address.
+
+Typical flow:
+
+```bash
+export RPC_URL="https://your-arbitrum-sepolia-rpc"
+export PRIVATE_KEY="0xYOUR_PRIVATE_KEY"
+export SETTLEMENT_TOKEN="0xYOUR_ERC20_ON_ARBITRUM_SEPOLIA"
+export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"
+export PROTOCOL_FEE_BPS="0"
+# optional:
+export PROTOCOL_OWNER="0xYOUR_OWNER"
+
+forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
+```
+
+Current Arbitrum Sepolia deployment as of 2026-05-04:
+
+- chain ID: `421614`
+- contract: `0x4205B0b2c02e01771A7F7DE0A9Eb603DF96b273b`
+- deploy tx: `0x5f0eaeeb77ad6601f7588cb1372f11c7c0cf8f85f19d07e799f14df9c664a967`
+- block: `265392755`
+- settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
+- fee recipient: `0x756c9D74142f39D219f71A2518893583F4E182DD`
+- owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
+- protocol fee bps: `500`
+
+## Roadmap
+
+Future roadmap may include Protected Delivery, Escrow Mode, or gateway adapters for pay-from-other-chain UX, but those are not part of zkReveal v1.
+
+The v1 core is intentionally focused on receipt-mode settlement and off-chain fulfillment.
